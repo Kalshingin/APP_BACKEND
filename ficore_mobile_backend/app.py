@@ -149,6 +149,17 @@ with app.app_context():
     
     # Initialize admin user
     initialize_admin_user()
+    
+    # Run immutability migration (idempotent - safe to run multiple times)
+    from utils.immutability_migrator import run_immutability_migration
+    migration_result = run_immutability_migration(mongo.db)
+    
+    if migration_result['success'] and not migration_result['already_run']:
+        print("✅ Immutability migration completed successfully")
+    elif migration_result['already_run']:
+        print("✅ Immutability migration already completed (skipped)")
+    else:
+        print(f"⚠️  Immutability migration failed: {migration_result.get('error', 'Unknown error')}")
 
 # Helper function to convert ObjectId to string
 def serialize_doc(doc):

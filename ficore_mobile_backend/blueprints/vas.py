@@ -33,6 +33,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     VTPASS_BASE_URL = os.environ.get('VTPASS_BASE_URL', 'https://sandbox.vtpass.com')
     
     VAS_TRANSACTION_FEE = 30.0
+    ACTIVATION_FEE = 100.0
+    BVN_VERIFICATION_COST = 10.0
+    NIN_VERIFICATION_COST = 60.0
     
     # ==================== HELPER FUNCTIONS ====================
     
@@ -41,6 +44,186 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         timestamp = int(datetime.utcnow().timestamp())
         unique_suffix = str(uuid.uuid4())[:8]
         return f'FICORE_{transaction_type}_{user_id}_{timestamp}_{unique_suffix}'
+    
+    def check_eligibility(user_id):
+        """
+        Check if user is eligible for dedicated account (Path B)
+        User must meet ONE of these criteria:
+        1. Used app for 3+ consecutive days
+        2. Recorded 10+ transactions (income/expense)
+        3. Completed 5+ Quick Pay VAS transactions
+        """
+        user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+        
+        # Check 1: Consecutive days
+        login_streak = user.get('loginStreak', 0)
+        if login_streak >= 3:
+            return True, "3-day streak"
+        
+        # Check 2: Total transactions
+        total_txns = mongo.db.income.count_documents({'userId': ObjectId(user_id)})
+        total_txns += mongo.db.expenses.count_documents({'userId': ObjectId(user_id)})
+        if total_txns >= 10:
+            return True, "10+ transactions"
+        
+        # Check 3: Quick Pay usage
+        quick_pay_count = mongo.db.vas_transactions.count_documents({
+            'userId': ObjectId(user_id),
+            'type': {'$in': ['AIRTIME', 'DATA']},
+            'status': 'SUCCESS'
+        })
+        if quick_pay_count >= 5:
+            return True, "5+ Quick Pay"
+        
+        return False, None
+    
+    def get_eligibility_progress(user_id):
+        """Get user's progress towards eligibility"""
+        user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+        
+        login_streak = user.get('loginStreak', 0)
+        total_txns = mongo.db.income.count_documents({'userId': ObjectId(user_id)})
+        total_txns += mongo.db.expenses.count_documents({'userId': ObjectId(user_id)})
+        quick_pay_count = mongo.db.vas_transactions.count_documents({
+            'userId': ObjectId(user_id),
+            'type': {'$in': ['AIRTIME', 'DATA']},
+            'status': 'SUCCESS'
+        })
+        
+        # Return flat structure that matches frontend expectations
+        return {
+            'loginDays': login_streak,  # Frontend expects 'loginDays', not 'loginStreak'
+            'totalTransactions': total_txns,
+            'quickPayCount': quick_pay_count
+        }
+    
+    def call_monnify_auth():
+        """Get Monnify authentication token"""
+        try:
+            auth_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v1/auth/login',
+                auth=(MONNIFY_API_KEY, MONNIFY_SECRET_KEY),
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            )
+            
+            if auth_response.status_code != 200:
+                raise Exception(f'Monnify auth failed: {auth_response.text}')
+            
+            return auth_response.json()['responseBody']['accessToken']
+        except Exception as e:
+            print(f'❌ Monnify auth error: {str(e)}')
+            raise
+    
+    def call_monnify_bvn_verification(bvn, name, dob, mobile):
+        """
+        Call Monnify BVN verification API
+        Cost: ₦10 per successful request
+        """
+        try:
+            access_token = call_monnify_auth()
+            
+            response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v1/vas/bvn-details-match',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'bvn': bvn,
+                    'name': name,
+                    'dateOfBirth': dob,
+                    'mobileNo': mobile
+                },
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f'BVN verification failed: {response.text}')
+            
+            data = response.json()
+            if not data.get('requestSuccessful'):
+                raise Exception(f'BVN verification failed: {data.get("responseMessage")}')
+            
+            return data['responseBody']
+        except Exception as e:
+            print(f'❌ BVN verification error: {str(e)}')
+            raise
+    
+    def call_monnify_nin_verification(nin):
+        """
+        Call Monnify NIN verification API
+        Cost: ₦60 per successful request
+        Returns NIN holder's details for validation
+        """
+        try:
+            access_token = call_monnify_auth()
+            
+            response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v1/vas/nin-details',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json={'nin': nin},
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f'NIN verification failed: {response.text}')
+            
+            data = response.json()
+            if not data.get('requestSuccessful'):
+                raise Exception(f'NIN verification failed: {data.get("responseMessage")}')
+            
+            return data['responseBody']
+        except Exception as e:
+            print(f'❌ NIN verification error: {str(e)}')
+            raise
+    
+    def call_monnify_init_payment(transaction_reference, amount, customer_name, customer_email):
+        """
+        Call Monnify's One-Time Payment API for Quick Pay
+        Returns temporary account number for this specific transaction
+        """
+        try:
+            access_token = call_monnify_auth()
+            
+            payment_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v1/merchant/bank-transfer/init-payment',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'transactionReference': transaction_reference,
+                    'amount': amount,
+                    'customerName': customer_name,
+                    'customerEmail': customer_email,
+                    'paymentDescription': f'FiCore Liquid Cash - {transaction_reference}',
+                    'currencyCode': 'NGN',
+                    'contractCode': MONNIFY_CONTRACT_CODE,
+                    'paymentMethods': ['ACCOUNT_TRANSFER'],
+                    'bankCode': '058'  # GTBank for USSD generation
+                },
+                timeout=30
+            )
+            
+            if payment_response.status_code != 200:
+                raise Exception(f'Payment init failed: {payment_response.text}')
+            
+            response_data = payment_response.json()['responseBody']
+            
+            return {
+                'accountNumber': response_data['accountNumber'],
+                'accountName': response_data['accountName'],
+                'bankName': response_data['bankName'],
+                'bankCode': response_data['bankCode'],
+                'ussdCode': response_data.get('ussdCode', '')
+            }
+        except Exception as e:
+            print(f'❌ Monnify init payment error: {str(e)}')
+            raise
     
     def check_pending_transaction(user_id, transaction_type, amount, phone_number):
         """Check for pending duplicate transactions (idempotency)"""
@@ -293,6 +476,373 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             return jsonify({
                 'success': False,
                 'message': 'Failed to retrieve wallet balance',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    # ==================== ELIGIBILITY & KYC ENDPOINTS ====================
+    
+    @vas_bp.route('/check-eligibility', methods=['GET'])
+    @token_required
+    def check_eligibility_endpoint(current_user):
+        """Check if user is eligible for dedicated account (Path B)"""
+        try:
+            user_id = str(current_user['_id'])
+            eligible, reason = check_eligibility(user_id)
+            progress = get_eligibility_progress(user_id)
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'eligible': eligible,
+                    'reason': reason,
+                    'progress': progress
+                },
+                'message': 'Eligibility checked successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error checking eligibility: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to check eligibility',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_bp.route('/verify-bvn', methods=['POST'])
+    @token_required
+    def verify_bvn(current_user):
+        """
+        Verify BVN, NIN, and DOB - return name for user confirmation
+        This is where you pay ₦70 to Monnify (₦10 BVN + ₦60 NIN)
+        """
+        try:
+            data = request.json
+            bvn = data.get('bvn', '').strip()
+            nin = data.get('nin', '').strip()
+            dob = data.get('dateOfBirth', '').strip()  # Format: DD-MMM-YYYY
+            
+            # Validate
+            if len(bvn) != 11 or not bvn.isdigit():
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid BVN. Must be 11 digits.'
+                }), 400
+            
+            if len(nin) != 11 or not nin.isdigit():
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid NIN. Must be 11 digits.'
+                }), 400
+            
+            if not dob:
+                return jsonify({
+                    'success': False,
+                    'message': 'Date of birth is required.'
+                }), 400
+            
+            # Check eligibility first (prevent ₦70 waste)
+            user_id = str(current_user['_id'])
+            eligible, _ = check_eligibility(user_id)
+            if not eligible:
+                return jsonify({
+                    'success': False,
+                    'message': 'Not eligible yet. Complete more transactions to unlock.'
+                }), 403
+            
+            # Check if user already has verified wallet
+            existing_wallet = mongo.db.vas_wallets.find_one({
+                'userId': ObjectId(user_id),
+                'kycStatus': 'verified'
+            })
+            if existing_wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'You already have a verified account.'
+                }), 400
+            
+            # Call Monnify BVN verification (₦10 cost)
+            user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
+            bvn_response = call_monnify_bvn_verification(
+                bvn=bvn,
+                name=user_name,
+                dob=dob,
+                mobile=current_user.get('phoneNumber', '')
+            )
+            
+            # Check BVN match status
+            name_match = bvn_response.get('name', {})
+            if name_match.get('matchStatus') != 'FULL_MATCH':
+                return jsonify({
+                    'success': False,
+                    'message': 'BVN verification failed. Name does not match.'
+                }), 400
+            
+            dob_match = bvn_response.get('dateOfBirth', 'NO_MATCH')
+            if dob_match == 'NO_MATCH':
+                return jsonify({
+                    'success': False,
+                    'message': 'BVN verification failed. Date of birth does not match.'
+                }), 400
+            
+            # Call Monnify NIN verification (₦60 cost)
+            nin_response = call_monnify_nin_verification(nin=nin)
+            
+            # Validate NIN response
+            nin_first_name = nin_response.get('firstName', '').upper()
+            nin_last_name = nin_response.get('lastName', '').upper()
+            nin_full_name = f"{nin_first_name} {nin_last_name}".strip()
+            
+            # Cross-check: NIN name should match user's name
+            user_first = current_user.get('firstName', '').upper()
+            user_last = current_user.get('lastName', '').upper()
+            
+            if nin_first_name not in user_first and nin_last_name not in user_last:
+                return jsonify({
+                    'success': False,
+                    'message': 'NIN verification failed. Name does not match your profile.'
+                }), 400
+            
+            # Store verification result temporarily (don't create account yet)
+            # Delete any existing pending verifications
+            mongo.db.kyc_verifications.delete_many({
+                'userId': ObjectId(user_id),
+                'status': 'pending_confirmation'
+            })
+            
+            # Create new verification record with BOTH BVN and NIN
+            mongo.db.kyc_verifications.insert_one({
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'bvn': bvn,
+                'nin': nin,
+                'verifiedName': user_name,
+                'ninName': nin_full_name,
+                'status': 'pending_confirmation',
+                'createdAt': datetime.utcnow(),
+                'expiresAt': datetime.utcnow() + timedelta(minutes=10)
+            })
+            
+            print(f'✅ BVN & NIN verified for user {user_id}: {user_name}')
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'verifiedName': user_name,
+                    'ninName': nin_full_name,
+                    'matchStatus': 'FULL_MATCH'
+                },
+                'message': 'BVN and NIN verified successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error verifying BVN/NIN: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Verification failed',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_bp.route('/confirm-kyc', methods=['POST'])
+    @token_required
+    def confirm_kyc(current_user):
+        """
+        User confirmed the name is correct
+        Now create the reserved account with KYC
+        """
+        try:
+            user_id = str(current_user['_id'])
+            
+            # Get pending verification
+            verification = mongo.db.kyc_verifications.find_one({
+                'userId': ObjectId(user_id),
+                'status': 'pending_confirmation',
+                'expiresAt': {'$gt': datetime.utcnow()}
+            })
+            
+            if not verification:
+                return jsonify({
+                    'success': False,
+                    'message': 'Verification expired. Please try again.'
+                }), 400
+            
+            # Check if wallet already exists
+            existing_wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if existing_wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet already exists.'
+                }), 400
+            
+            # Create reserved account with BVN and NIN (reuse existing wallet creation logic)
+            access_token = call_monnify_auth()
+            
+            account_data = {
+                'accountReference': f'FICORE_{user_id}',
+                'accountName': verification['verifiedName'],
+                'currencyCode': 'NGN',
+                'contractCode': MONNIFY_CONTRACT_CODE,
+                'customerEmail': current_user.get('email', ''),
+                'customerName': verification['verifiedName'],
+                'bvn': verification['bvn'],
+                'nin': verification['nin'],  # Include NIN for full Tier 2 compliance
+                'getAllAvailableBanks': False,
+                'preferredBanks': ['035']  # Wema Bank
+            }
+            
+            van_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json=account_data,
+                timeout=30
+            )
+            
+            if van_response.status_code != 200:
+                raise Exception(f'Reserved account creation failed: {van_response.text}')
+            
+            van_data = van_response.json()['responseBody']
+            
+            # Create wallet with KYC info (BVN + NIN for full Tier 2)
+            wallet = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'balance': 0.0,
+                'accountReference': van_data['accountReference'],
+                'accountName': van_data['accountName'],
+                'accounts': van_data['accounts'],
+                'kycStatus': 'verified',
+                'kycTier': 2,  # Full Tier 2 compliance with BVN + NIN
+                'bvnVerified': True,
+                'ninVerified': True,
+                'verifiedName': verification['verifiedName'],
+                'verificationDate': datetime.utcnow(),
+                'isActivated': False,
+                'activationFeeDeducted': False,
+                'activationDate': None,
+                'status': 'active',
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow()
+            }
+            
+            mongo.db.vas_wallets.insert_one(wallet)
+            
+            # Update verification status
+            mongo.db.kyc_verifications.update_one(
+                {'_id': verification['_id']},
+                {'$set': {'status': 'confirmed', 'updatedAt': datetime.utcnow()}}
+            )
+            
+            print(f'✅ Reserved account created for user {user_id}')
+            
+            return jsonify({
+                'success': True,
+                'data': serialize_doc(wallet),
+                'message': 'Account created successfully'
+            }), 201
+            
+        except Exception as e:
+            print(f'❌ Error confirming KYC: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to create account',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    # ==================== QUICK PAY ENDPOINTS ====================
+    
+    @vas_bp.route('/quick-pay/initiate', methods=['POST'])
+    @token_required
+    def initiate_quick_pay(current_user):
+        """
+        Initiate a Quick Pay transaction using Monnify One-Time Payment
+        No wallet needed - direct payment to one-time account
+        """
+        try:
+            data = request.json
+            transaction_type = data.get('type', '').upper()  # 'AIRTIME' or 'DATA'
+            amount = float(data.get('amount', 0))
+            phone_number = data.get('phoneNumber', '').strip()
+            network = data.get('network', '').upper()
+            
+            # Validate
+            if transaction_type not in ['AIRTIME', 'DATA']:
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid transaction type'
+                }), 400
+            
+            if amount <= 0:
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid amount'
+                }), 400
+            
+            if not phone_number or not network:
+                return jsonify({
+                    'success': False,
+                    'message': 'Phone number and network are required'
+                }), 400
+            
+            user_id = str(current_user['_id'])
+            
+            # Generate unique transaction reference
+            transaction_ref = f'FICORE_QP_{user_id}_{int(datetime.utcnow().timestamp())}'
+            
+            # Store pending transaction (before payment)
+            pending_txn = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'type': transaction_type,
+                'amount': amount,
+                'phoneNumber': phone_number,
+                'network': network,
+                'transactionReference': transaction_ref,
+                'status': 'PENDING_PAYMENT',
+                'paymentMethod': 'QUICK_PAY',
+                'createdAt': datetime.utcnow(),
+                'expiresAt': datetime.utcnow() + timedelta(minutes=30)
+            }
+            
+            if transaction_type == 'DATA':
+                pending_txn['dataPlanId'] = data.get('dataPlanId', '')
+                pending_txn['dataPlanName'] = data.get('dataPlanName', '')
+            
+            mongo.db.vas_transactions.insert_one(pending_txn)
+            
+            # Call Monnify to generate one-time payment account
+            customer_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
+            monnify_response = call_monnify_init_payment(
+                transaction_reference=transaction_ref,
+                amount=amount,
+                customer_name=customer_name,
+                customer_email=current_user.get('email', '')
+            )
+            
+            print(f'✅ Quick Pay initiated: {transaction_ref}')
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'transactionId': str(pending_txn['_id']),
+                    'transactionReference': transaction_ref,
+                    'accountNumber': monnify_response['accountNumber'],
+                    'accountName': monnify_response['accountName'],
+                    'bankName': monnify_response['bankName'],
+                    'bankCode': monnify_response['bankCode'],
+                    'ussdCode': monnify_response.get('ussdCode', ''),
+                    'amount': amount,
+                    'expiresAt': pending_txn['expiresAt'].isoformat() + 'Z'
+                },
+                'message': 'Payment account generated. Transfer to complete purchase.'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error initiating quick pay: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to initiate payment',
                 'errors': {'general': [str(e)]}
             }), 500
     
