@@ -3814,5 +3814,231 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                 'message': 'Failed to retrieve activation funnel',
                 'errors': {'general': [str(e)]}
             }), 500
+
+    # ===== CERTIFIED LEDGER EXPORT ENDPOINT =====
+
+    @admin_bp.route('/ledger/certified/<user_id>', methods=['GET'])
+    @token_required
+    @admin_required
+    def generate_certified_ledger(current_user, user_id):
+        """
+        Generate Certified Ledger PDF for a specific user
+        
+        This is the "M-Pesa Standard" - a tamper-evident financial ledger that shows:
+        - Complete transaction lifecycle (original → superseded → voided)
+        - Reversal entries for deleted transactions
+        - Version history for edited transactions
+        - Verification QR code for authenticity
+        
+        Query Parameters:
+        - start_date: Start date (YYYY-MM-DD) - optional
+        - end_date: End date (YYYY-MM-DD) - optional
+        - include_all_statuses: Include voided/superseded transactions (default: true)
+        """
+        try:
+            from utils.pdf_generator import PDFGenerator
+            from flask import make_response
+            
+            # Get user
+            user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+            if not user:
+                return jsonify({
+                    'success': False,
+                    'message': 'User not found'
+                }), 404
+            
+            # Get date range parameters
+            start_date_str = request.args.get('start_date')
+            end_date_str = request.args.get('end_date')
+            include_all_statuses = request.args.get('include_all_statuses', 'true').lower() == 'true'
+            
+            start_date = None
+            end_date = None
+            
+            if start_date_str:
+                start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+            if end_date_str:
+                end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+            
+            # Build query for transactions
+            query = {'userId': ObjectId(user_id)}
+            
+            if start_date or end_date:
+                date_filter = {}
+                if start_date:
+                    date_filter['$gte'] = start_date
+                if end_date:
+                    date_filter['$lte'] = end_date
+                # Note: We'll filter by date in the query
+            
+            # For certified ledger, we want ALL transactions (including voided/superseded)
+            # to show the complete audit trail
+            if not include_all_statuses:
+                # Only active transactions
+                query['status'] = 'active'
+                query['isDeleted'] = False
+            
+            # Get all incomes
+            income_query = query.copy()
+            if start_date or end_date:
+                date_filter = {}
+                if start_date:
+                    date_filter['$gte'] = start_date
+                if end_date:
+                    date_filter['$lte'] = end_date
+                income_query['dateReceived'] = date_filter
+            
+            incomes = list(mongo.db.incomes.find(income_query).sort('dateReceived', 1))
+            
+            # Get all expenses
+            expense_query = query.copy()
+            if start_date or end_date:
+                date_filter = {}
+                if start_date:
+                    date_filter['$gte'] = start_date
+                if end_date:
+                    date_filter['$lte'] = end_date
+                expense_query['date'] = date_filter
+            
+            expenses = list(mongo.db.expenses.find(expense_query).sort('date', 1))
+            
+            # Serialize transactions
+            transactions = {
+                'incomes': [serialize_doc(income) for income in incomes],
+                'expenses': [serialize_doc(expense) for expense in expenses]
+            }
+            
+            # Generate unique audit ID
+            audit_id = f"FCL-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{user_id[:8]}"
+            
+            # Generate PDF
+            pdf_generator = PDFGenerator()
+            user_data = serialize_doc(user)
+            pdf_buffer = pdf_generator.generate_certified_ledger(
+                user_data=user_data,
+                transactions=transactions,
+                start_date=start_date,
+                end_date=end_date,
+                audit_id=audit_id
+            )
+            
+            # Create response
+            response = make_response(pdf_buffer.read())
+            response.headers['Content-Type'] = 'application/pdf'
+            
+            # Generate filename
+            user_name = user.get('displayName', 'User').replace(' ', '_')
+            date_suffix = ''
+            if start_date and end_date:
+                date_suffix = f"_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}"
+            elif start_date:
+                date_suffix = f"_from_{start_date.strftime('%Y%m%d')}"
+            elif end_date:
+                date_suffix = f"_until_{end_date.strftime('%Y%m%d')}"
+            
+            filename = f"FiCore_Certified_Ledger_{user_name}{date_suffix}_{audit_id}.pdf"
+            response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+            
+            # Log the export for audit trail
+            mongo.db.admin_audit_logs.insert_one({
+                '_id': ObjectId(),
+                'adminId': current_user['_id'],
+                'adminEmail': current_user.get('email'),
+                'action': 'certified_ledger_export',
+                'targetUserId': ObjectId(user_id),
+                'targetUserEmail': user.get('email'),
+                'auditId': audit_id,
+                'dateRange': {
+                    'start': start_date.isoformat() if start_date else None,
+                    'end': end_date.isoformat() if end_date else None
+                },
+                'includeAllStatuses': include_all_statuses,
+                'transactionCount': len(incomes) + len(expenses),
+                'timestamp': datetime.utcnow()
+            })
+            
+            return response
+            
+        except Exception as e:
+            print(f"Error generating certified ledger: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                'success': False,
+                'message': 'Failed to generate certified ledger',
+                'errors': {'general': [str(e)]}
+            }), 500
+
+    @admin_bp.route('/ledger/search-users', methods=['GET'])
+    @token_required
+    @admin_required
+    def search_users_for_ledger(current_user):
+        """
+        Search users for certified ledger export
+        
+        Query Parameters:
+        - q: Search query (email, name, phone)
+        - limit: Number of results (default: 20, max: 100)
+        """
+        try:
+            search_query = request.args.get('q', '').strip()
+            limit = min(int(request.args.get('limit', 20)), 100)
+            
+            if not search_query:
+                return jsonify({
+                    'success': False,
+                    'message': 'Search query is required'
+                }), 400
+            
+            # Build search query
+            query = {
+                '$or': [
+                    {'email': {'$regex': search_query, '$options': 'i'}},
+                    {'displayName': {'$regex': search_query, '$options': 'i'}},
+                    {'firstName': {'$regex': search_query, '$options': 'i'}},
+                    {'lastName': {'$regex': search_query, '$options': 'i'}},
+                    {'phone': {'$regex': search_query, '$options': 'i'}}
+                ]
+            }
+            
+            # Get users
+            users = list(mongo.db.users.find(query).limit(limit))
+            
+            # Format results
+            results = []
+            for user in users:
+                # Get transaction counts
+                income_count = mongo.db.incomes.count_documents({'userId': user['_id']})
+                expense_count = mongo.db.expenses.count_documents({'userId': user['_id']})
+                
+                results.append({
+                    'id': str(user['_id']),
+                    'email': user.get('email', ''),
+                    'displayName': user.get('displayName', ''),
+                    'phone': user.get('phone', ''),
+                    'businessName': user.get('businessName', ''),
+                    'transactionCount': income_count + expense_count,
+                    'incomeCount': income_count,
+                    'expenseCount': expense_count,
+                    'createdAt': user.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
+                })
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'users': results,
+                    'count': len(results),
+                    'query': search_query
+                },
+                'message': 'Users found successfully'
+            })
+            
+        except Exception as e:
+            print(f"Error searching users: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': 'Failed to search users',
+                'errors': {'general': [str(e)]}
+            }), 500
          
     return admin_bp
