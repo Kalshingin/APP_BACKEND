@@ -867,4 +867,83 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
+    @vas_bp.route('/reserved-account', methods=['GET'])
+    @token_required
+    def get_reserved_account(current_user):
+        """Get user's reserved account details"""
+        try:
+            user_id = str(current_user['_id'])
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Reserved account not found. Please create a wallet first.'
+                }), 404
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'accountReference': wallet.get('accountReference', ''),
+                    'accountName': wallet.get('accountName', ''),
+                    'accounts': wallet.get('accounts', []),
+                    'status': wallet.get('status', 'active'),
+                    'createdAt': wallet.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
+                },
+                'message': 'Reserved account retrieved successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error getting reserved account: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to retrieve reserved account',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_bp.route('/reserved-account/transactions', methods=['GET'])
+    @token_required
+    def get_reserved_account_transactions(current_user):
+        """Get user's reserved account transaction history (wallet funding transactions)"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            limit = int(request.args.get('limit', 50))
+            skip = int(request.args.get('skip', 0))
+            
+            # Get only WALLET_FUNDING transactions
+            transactions = list(
+                mongo.db.vas_transactions.find({
+                    'userId': ObjectId(user_id),
+                    'type': 'WALLET_FUNDING'
+                })
+                .sort('createdAt', -1)
+                .skip(skip)
+                .limit(limit)
+            )
+            
+            serialized_transactions = []
+            for txn in transactions:
+                txn_data = serialize_doc(txn)
+                # Ensure createdAt is a string for frontend compatibility
+                txn_data['createdAt'] = txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
+                # Add reference and description for frontend display
+                txn_data['reference'] = txn.get('reference', '')
+                txn_data['description'] = f"Wallet Funding - ₦{txn.get('amount', 0):.2f}"
+                serialized_transactions.append(txn_data)
+            
+            return jsonify({
+                'success': True,
+                'data': serialized_transactions,
+                'message': 'Reserved account transactions retrieved successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error getting reserved account transactions: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to retrieve reserved account transactions',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
     return vas_bp
