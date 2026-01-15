@@ -896,7 +896,20 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     print(f'❌ Wallet not found for user: {user_id}')
                     return jsonify({'success': False, 'message': 'Wallet not found'}), 404
                 
-                new_balance = wallet.get('balance', 0.0) + amount_paid
+                # Check if user is premium (no deposit fee)
+                user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+                is_premium = user.get('subscriptionStatus') == 'active' if user else False
+                
+                # Apply deposit fee (₦30 for non-premium users)
+                deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
+                amount_to_credit = amount_paid - deposit_fee
+                
+                # Ensure we don't credit negative amounts
+                if amount_to_credit <= 0:
+                    print(f'⚠️ Amount too small after fee: ₦{amount_paid} - ₦{deposit_fee} = ₦{amount_to_credit}')
+                    return jsonify({'success': False, 'message': 'Amount too small to process'}), 400
+                
+                new_balance = wallet.get('balance', 0.0) + amount_to_credit
                 
                 mongo.db.vas_wallets.update_one(
                     {'userId': ObjectId(user_id)},
@@ -907,7 +920,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     '_id': ObjectId(),
                     'userId': ObjectId(user_id),
                     'type': 'WALLET_FUNDING',
-                    'amount': amount_paid,
+                    'amount': amount_to_credit,
+                    'amountPaid': amount_paid,
+                    'depositFee': deposit_fee,
                     'reference': transaction_reference,
                     'status': 'SUCCESS',
                     'provider': 'monnify',
@@ -917,7 +932,28 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 
                 mongo.db.vas_transactions.insert_one(transaction)
                 
-                print(f'✅ Wallet funded: User {user_id}, Amount: ₦{amount_paid}, New Balance: ₦{new_balance}')
+                # CRITICAL: Record corporate revenue (₦30 fee) - NEW
+                if deposit_fee > 0:
+                    corporate_revenue = {
+                        '_id': ObjectId(),
+                        'type': 'SERVICE_FEE',
+                        'category': 'DEPOSIT_FEE',
+                        'amount': deposit_fee,
+                        'userId': ObjectId(user_id),
+                        'relatedTransaction': transaction_reference,
+                        'description': f'Deposit fee from user {user_id}',
+                        'status': 'RECORDED',
+                        'createdAt': datetime.utcnow(),
+                        'metadata': {
+                            'amountPaid': amount_paid,
+                            'amountCredited': amount_to_credit,
+                            'isPremium': is_premium
+                        }
+                    }
+                    mongo.db.corporate_revenue.insert_one(corporate_revenue)
+                    print(f'💰 Corporate revenue recorded: ₦{deposit_fee} from user {user_id}')
+                
+                print(f'✅ Wallet funded: User {user_id}, Paid: ₦{amount_paid}, Fee: ₦{deposit_fee}, Credited: ₦{amount_to_credit}, New Balance: ₦{new_balance}')
                 return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
             
             return jsonify({'success': True, 'message': 'Event received'}), 200
@@ -974,9 +1010,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Wallet not found. Please create a wallet first.'
                 }), 404
             
-            is_premium = current_user.get('subscriptionStatus') == 'active'
-            transaction_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
-            total_amount = amount + transaction_fee
+            # NO transaction fee on purchases (fee is only on deposits)
+            transaction_fee = 0.0
+            total_amount = amount
             
             if wallet.get('balance', 0.0) < total_amount:
                 return jsonify({
@@ -1139,9 +1175,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Wallet not found. Please create a wallet first.'
                 }), 404
             
-            is_premium = current_user.get('subscriptionStatus') == 'active'
-            transaction_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
-            total_amount = amount + transaction_fee
+            # NO transaction fee on purchases (fee is only on deposits)
+            transaction_fee = 0.0
+            total_amount = amount
             
             if wallet.get('balance', 0.0) < total_amount:
                 return jsonify({
@@ -1317,17 +1353,40 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             )
             
             if response.status_code == 200:
+                peyflex_data = response.json()
+                print(f'✅ Peyflex data networks response: {peyflex_data}')
                 return jsonify({
                     'success': True,
-                    'data': response.json(),
-                    'message': 'Networks retrieved successfully'
+                    'data': peyflex_data,
+                    'message': 'Data networks retrieved successfully'
                 }), 200
             else:
+                print(f'⚠️ Peyflex data networks failed: {response.status_code}')
+                # Return default data networks based on Peyflex documentation
                 return jsonify({
                     'success': True,
                     'data': [
-                        {'id': 'mtn', 'name': 'MTN'},
-                        {'id': 'airtel', 'name': 'Airtel'},
+                        {'id': 'mtn_sme_data', 'name': 'MTN SME Data'},
+                        {'id': 'mtn_gifting_data', 'name': 'MTN Gifting Data'},
+                        {'id': 'airtel_data', 'name': 'Airtel Data'},
+                        {'id': 'glo_data', 'name': 'Glo Data'},
+                        {'id': '9mobile_data', 'name': '9mobile Data'},
+                    ],
+                    'message': 'Default data networks list'
+                }), 200
+        except Exception as e:
+            print(f'⚠️ Error getting data networks: {str(e)}')
+            return jsonify({
+                'success': True,
+                'data': [
+                    {'id': 'mtn_sme_data', 'name': 'MTN SME Data'},
+                    {'id': 'mtn_gifting_data', 'name': 'MTN Gifting Data'},
+                    {'id': 'airtel_data', 'name': 'Airtel Data'},
+                    {'id': 'glo_data', 'name': 'Glo Data'},
+                    {'id': '9mobile_data', 'name': '9mobile Data'},
+                ],
+                'message': 'Default data networks list'
+            }), 200
                         {'id': 'glo', 'name': 'Glo'},
                         {'id': '9mobile', 'name': '9mobile'}
                     ],
@@ -1350,25 +1409,33 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     def get_data_plans(network):
         """Get data plans for a specific network"""
         try:
-            response = requests.get(
-                f'{PEYFLEX_BASE_URL}/api/data/plans/?network={network.lower()}',
-                timeout=10
-            )
+            # Network should be full ID like 'mtn_sme_data', not just 'mtn'
+            url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={network.lower()}'
+            print(f'🔍 Fetching data plans from: {url}')
+            
+            response = requests.get(url, timeout=10)
+            
+            print(f'📡 Peyflex response status: {response.status_code}')
+            print(f'📡 Peyflex response body: {response.text[:500]}')
             
             if response.status_code == 200:
+                plans_data = response.json()
                 return jsonify({
                     'success': True,
-                    'data': response.json(),
+                    'data': plans_data,
                     'message': 'Data plans retrieved successfully'
                 }), 200
             else:
+                print(f'❌ Peyflex returned error: {response.status_code} - {response.text}')
                 return jsonify({
                     'success': False,
-                    'message': 'Failed to retrieve data plans',
-                    'errors': {'general': ['Provider API error']}
+                    'message': f'Provider returned status {response.status_code}',
+                    'errors': {'general': ['Failed to fetch data plans from provider']}
                 }), 500
         except Exception as e:
             print(f'❌ Error getting data plans: {str(e)}')
+            import traceback
+            traceback.print_exc()
             return jsonify({
                 'success': False,
                 'message': 'Failed to retrieve data plans',

@@ -1,7 +1,40 @@
 // ===== UTILITY FUNCTIONS FOR ADMIN WEB APP =====
 
-// Configuration
-const API_BASE_URL = 'https://mobilebackend.ficoreafrica.com';
+// Configuration - Smart Backend Selection
+const BACKENDS = {
+    production: 'https://mobilebackend.ficoreafrica.com',
+    dev: 'https://ficore-dev.onrender.com'
+};
+
+// Get or set backend preference
+function getBackendURL() {
+    // Check if user has a saved preference
+    let savedBackend = localStorage.getItem('admin_backend');
+    
+    // If no preference, default to production
+    if (!savedBackend) {
+        savedBackend = 'production';
+        localStorage.setItem('admin_backend', savedBackend);
+    }
+    
+    return BACKENDS[savedBackend] || BACKENDS.production;
+}
+
+// Switch backend
+function switchBackend(backend) {
+    if (BACKENDS[backend]) {
+        localStorage.setItem('admin_backend', backend);
+        showSuccess(`Switched to ${backend.toUpperCase()} backend. Refreshing...`);
+        setTimeout(() => location.reload(), 1000);
+    }
+}
+
+// Get current backend name
+function getCurrentBackend() {
+    return localStorage.getItem('admin_backend') || 'production';
+}
+
+const API_BASE_URL = getBackendURL();
 
 // Get admin token from localStorage
 function getAdminToken() {
