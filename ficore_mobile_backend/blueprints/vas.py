@@ -181,7 +181,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             print(f'❌ NIN verification error: {str(e)}')
             raise
     
-    def call_monnify_init_payment(transaction_reference, amount, customer_name, customer_email):
+    def call_monnify_init_payment(transaction_reference, amount, customer_name, customer_email, payment_description='FiCore Liquid Cash Payment'):
         """
         Call Monnify's One-Time Payment API for Quick Pay
         Returns temporary account number for this specific transaction
@@ -200,7 +200,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'amount': amount,
                     'customerName': customer_name,
                     'customerEmail': customer_email,
-                    'paymentDescription': f'FiCore Liquid Cash - {transaction_reference}',
+                    'paymentDescription': payment_description,
                     'currencyCode': 'NGN',
                     'contractCode': MONNIFY_CONTRACT_CODE,
                     'paymentMethods': ['ACCOUNT_TRANSFER'],
@@ -757,29 +757,33 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     def initiate_quick_pay(current_user):
         """
         Initiate a Quick Pay transaction using Monnify One-Time Payment
+        Supports: WALLET_FUNDING, AIRTIME, DATA
         No wallet needed - direct payment to one-time account
         """
         try:
             data = request.json
-            transaction_type = data.get('type', '').upper()  # 'AIRTIME' or 'DATA'
+            transaction_type = data.get('type', '').upper()  # 'WALLET_FUNDING', 'AIRTIME', or 'DATA'
             amount = float(data.get('amount', 0))
             phone_number = data.get('phoneNumber', '').strip()
             network = data.get('network', '').upper()
             
-            # Validate
-            if transaction_type not in ['AIRTIME', 'DATA']:
+            # Validate transaction type
+            if transaction_type not in ['WALLET_FUNDING', 'AIRTIME', 'DATA']:
                 return jsonify({
                     'success': False,
-                    'message': 'Invalid transaction type'
+                    'message': 'Invalid transaction type. Must be WALLET_FUNDING, AIRTIME, or DATA'
                 }), 400
             
-            if amount <= 0:
+            # For wallet funding, amount can be 0 (user decides later)
+            # For VAS purchases, amount must be > 0
+            if transaction_type in ['AIRTIME', 'DATA'] and amount <= 0:
                 return jsonify({
                     'success': False,
                     'message': 'Invalid amount'
                 }), 400
             
-            if not phone_number or not network:
+            # Phone number and network only required for VAS purchases
+            if transaction_type in ['AIRTIME', 'DATA'] and (not phone_number or not network):
                 return jsonify({
                     'success': False,
                     'message': 'Phone number and network are required'
@@ -790,20 +794,27 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             # Generate unique transaction reference
             transaction_ref = f'FICORE_QP_{user_id}_{int(datetime.utcnow().timestamp())}'
             
+            # For wallet funding, use a placeholder amount (user decides actual amount)
+            # Monnify will accept any amount >= this value
+            monnify_amount = amount if amount > 0 else 100.0  # Minimum ₦100
+            
             # Store pending transaction (before payment)
             pending_txn = {
                 '_id': ObjectId(),
                 'userId': ObjectId(user_id),
                 'type': transaction_type,
-                'amount': amount,
-                'phoneNumber': phone_number,
-                'network': network,
+                'amount': amount,  # 0 for wallet funding means "any amount"
                 'transactionReference': transaction_ref,
                 'status': 'PENDING_PAYMENT',
                 'paymentMethod': 'QUICK_PAY',
                 'createdAt': datetime.utcnow(),
                 'expiresAt': datetime.utcnow() + timedelta(minutes=30)
             }
+            
+            # Add phone/network for VAS purchases only
+            if transaction_type in ['AIRTIME', 'DATA']:
+                pending_txn['phoneNumber'] = phone_number
+                pending_txn['network'] = network
             
             if transaction_type == 'DATA':
                 pending_txn['dataPlanId'] = data.get('dataPlanId', '')
@@ -813,14 +824,23 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             # Call Monnify to generate one-time payment account
             customer_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
+            
+            # For wallet funding, set description appropriately
+            payment_description = 'FiCore Liquid Wallet Funding'
+            if transaction_type == 'AIRTIME':
+                payment_description = f'FiCore Airtime Purchase - {network}'
+            elif transaction_type == 'DATA':
+                payment_description = f'FiCore Data Purchase - {network}'
+            
             monnify_response = call_monnify_init_payment(
                 transaction_reference=transaction_ref,
-                amount=amount,
+                amount=monnify_amount,
                 customer_name=customer_name,
-                customer_email=current_user.get('email', '')
+                customer_email=current_user.get('email', ''),
+                payment_description=payment_description
             )
             
-            print(f'✅ Quick Pay initiated: {transaction_ref}')
+            print(f'✅ Quick Pay initiated: {transaction_ref} (Type: {transaction_type})')
             
             return jsonify({
                 'success': True,
@@ -832,7 +852,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'bankName': monnify_response['bankName'],
                     'bankCode': monnify_response['bankCode'],
                     'ussdCode': monnify_response.get('ussdCode', ''),
-                    'amount': amount,
+                    'amount': monnify_amount,  # Return the actual Monnify amount
                     'expiresAt': pending_txn['expiresAt'].isoformat() + 'Z'
                 },
                 'message': 'Payment account generated. Transfer to complete purchase.'
@@ -850,6 +870,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     def monnify_webhook():
         """Handle Monnify webhook with HMAC-SHA512 signature verification"""
         try:
+            # Optional: IP Whitelisting (uncomment for production)
+            # Monnify webhook IP: 35.242.133.146
+            # client_ip = request.headers.get('X-Real-IP', request.remote_addr)
+            # MONNIFY_WEBHOOK_IP = '35.242.133.146'
+            # if client_ip != MONNIFY_WEBHOOK_IP:
+            #     print(f'⚠️ Unauthorized webhook IP: {client_ip}')
+            #     return jsonify({'success': False, 'message': 'Unauthorized'}), 403
+            
             signature = request.headers.get('monnify-signature', '')
             payload = request.get_data(as_text=True)
             
@@ -875,86 +903,187 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 amount_paid = float(transaction_data.get('amountPaid', 0))
                 transaction_reference = transaction_data.get('transactionReference', '')
                 
-                if not account_reference.startswith('FICORE_'):
-                    print(f'⚠️ Invalid account reference: {account_reference}')
-                    return jsonify({'success': False, 'message': 'Invalid account reference'}), 400
+                print(f'💳 Processing payment: Ref={transaction_reference}, Amount=₦{amount_paid}')
                 
-                user_id = account_reference.replace('FICORE_', '')
+                # Handle Quick Pay transactions (starts with FICORE_QP_)
+                if transaction_reference.startswith('FICORE_QP_'):
+                    # Extract user ID from transaction reference
+                    parts = transaction_reference.split('_')
+                    if len(parts) >= 3:
+                        user_id = parts[2]
+                    else:
+                        print(f'⚠️ Invalid Quick Pay reference format: {transaction_reference}')
+                        return jsonify({'success': False, 'message': 'Invalid reference format'}), 400
+                    
+                    # Find the pending transaction
+                    pending_txn = mongo.db.vas_transactions.find_one({
+                        'transactionReference': transaction_reference,
+                        'status': 'PENDING_PAYMENT'
+                    })
+                    
+                    if not pending_txn:
+                        print(f'⚠️ No pending transaction found for: {transaction_reference}')
+                        return jsonify({'success': False, 'message': 'Transaction not found'}), 404
+                    
+                    txn_type = pending_txn.get('type')
+                    
+                    # Handle WALLET_FUNDING
+                    if txn_type == 'WALLET_FUNDING':
+                        wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                        if not wallet:
+                            print(f'❌ Wallet not found for user: {user_id}')
+                            return jsonify({'success': False, 'message': 'Wallet not found'}), 404
+                        
+                        # Check if user is premium (no deposit fee)
+                        user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+                        is_premium = user.get('subscriptionStatus') == 'active' if user else False
+                        
+                        # Apply deposit fee (₦30 for non-premium users)
+                        deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
+                        amount_to_credit = amount_paid - deposit_fee
+                        
+                        # Ensure we don't credit negative amounts
+                        if amount_to_credit <= 0:
+                            print(f'⚠️ Amount too small after fee: ₦{amount_paid} - ₦{deposit_fee} = ₦{amount_to_credit}')
+                            return jsonify({'success': False, 'message': 'Amount too small to process'}), 400
+                        
+                        new_balance = wallet.get('balance', 0.0) + amount_to_credit
+                        
+                        mongo.db.vas_wallets.update_one(
+                            {'userId': ObjectId(user_id)},
+                            {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+                        )
+                        
+                        # Update transaction status
+                        mongo.db.vas_transactions.update_one(
+                            {'_id': pending_txn['_id']},
+                            {'$set': {
+                                'status': 'SUCCESS',
+                                'amountPaid': amount_paid,
+                                'depositFee': deposit_fee,
+                                'amountCredited': amount_to_credit,
+                                'reference': transaction_reference,
+                                'provider': 'monnify',
+                                'metadata': transaction_data,
+                                'completedAt': datetime.utcnow()
+                            }}
+                        )
+                        
+                        # Record corporate revenue (₦30 fee)
+                        if deposit_fee > 0:
+                            corporate_revenue = {
+                                '_id': ObjectId(),
+                                'type': 'SERVICE_FEE',
+                                'category': 'DEPOSIT_FEE',
+                                'amount': deposit_fee,
+                                'userId': ObjectId(user_id),
+                                'relatedTransaction': transaction_reference,
+                                'description': f'Deposit fee from user {user_id}',
+                                'status': 'RECORDED',
+                                'createdAt': datetime.utcnow(),
+                                'metadata': {
+                                    'amountPaid': amount_paid,
+                                    'amountCredited': amount_to_credit,
+                                    'isPremium': is_premium
+                                }
+                            }
+                            mongo.db.corporate_revenue.insert_one(corporate_revenue)
+                            print(f'💰 Corporate revenue recorded: ₦{deposit_fee} from user {user_id}')
+                        
+                        print(f'✅ Quick Pay Wallet Funding: User {user_id}, Paid: ₦{amount_paid}, Fee: ₦{deposit_fee}, Credited: ₦{amount_to_credit}, New Balance: ₦{new_balance}')
+                        return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
+                    
+                    # Handle AIRTIME/DATA purchases (to be implemented)
+                    elif txn_type in ['AIRTIME', 'DATA']:
+                        print(f'⚠️ Quick Pay VAS purchase not yet implemented: {txn_type}')
+                        return jsonify({'success': False, 'message': 'VAS purchase via Quick Pay not yet implemented'}), 501
+                    
+                    else:
+                        print(f'⚠️ Unknown transaction type: {txn_type}')
+                        return jsonify({'success': False, 'message': 'Unknown transaction type'}), 400
                 
-                # Check for duplicate webhook (idempotency)
-                existing_txn = mongo.db.vas_transactions.find_one({
-                    'reference': transaction_reference,
-                    'type': 'WALLET_FUNDING'
-                })
-                
-                if existing_txn:
-                    print(f'⚠️ Duplicate webhook ignored: {transaction_reference}')
-                    return jsonify({'success': True, 'message': 'Already processed'}), 200
-                
-                wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
-                if not wallet:
-                    print(f'❌ Wallet not found for user: {user_id}')
-                    return jsonify({'success': False, 'message': 'Wallet not found'}), 404
-                
-                # Check if user is premium (no deposit fee)
-                user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
-                is_premium = user.get('subscriptionStatus') == 'active' if user else False
-                
-                # Apply deposit fee (₦30 for non-premium users)
-                deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
-                amount_to_credit = amount_paid - deposit_fee
-                
-                # Ensure we don't credit negative amounts
-                if amount_to_credit <= 0:
-                    print(f'⚠️ Amount too small after fee: ₦{amount_paid} - ₦{deposit_fee} = ₦{amount_to_credit}')
-                    return jsonify({'success': False, 'message': 'Amount too small to process'}), 400
-                
-                new_balance = wallet.get('balance', 0.0) + amount_to_credit
-                
-                mongo.db.vas_wallets.update_one(
-                    {'userId': ObjectId(user_id)},
-                    {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
-                )
-                
-                transaction = {
-                    '_id': ObjectId(),
-                    'userId': ObjectId(user_id),
-                    'type': 'WALLET_FUNDING',
-                    'amount': amount_to_credit,
-                    'amountPaid': amount_paid,
-                    'depositFee': deposit_fee,
-                    'reference': transaction_reference,
-                    'status': 'SUCCESS',
-                    'provider': 'monnify',
-                    'metadata': transaction_data,
-                    'createdAt': datetime.utcnow()
-                }
-                
-                mongo.db.vas_transactions.insert_one(transaction)
-                
-                # CRITICAL: Record corporate revenue (₦30 fee) - NEW
-                if deposit_fee > 0:
-                    corporate_revenue = {
+                # Handle Reserved Account transactions (existing logic)
+                elif account_reference and account_reference.startswith('FICORE_'):
+                    user_id = account_reference.replace('FICORE_', '')
+                    
+                    # Check for duplicate webhook (idempotency)
+                    existing_txn = mongo.db.vas_transactions.find_one({
+                        'reference': transaction_reference,
+                        'type': 'WALLET_FUNDING'
+                    })
+                    
+                    if existing_txn:
+                        print(f'⚠️ Duplicate webhook ignored: {transaction_reference}')
+                        return jsonify({'success': True, 'message': 'Already processed'}), 200
+                    
+                    wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                    if not wallet:
+                        print(f'❌ Wallet not found for user: {user_id}')
+                        return jsonify({'success': False, 'message': 'Wallet not found'}), 404
+                    
+                    # Check if user is premium (no deposit fee)
+                    user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+                    is_premium = user.get('subscriptionStatus') == 'active' if user else False
+                    
+                    # Apply deposit fee (₦30 for non-premium users)
+                    deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
+                    amount_to_credit = amount_paid - deposit_fee
+                    
+                    # Ensure we don't credit negative amounts
+                    if amount_to_credit <= 0:
+                        print(f'⚠️ Amount too small after fee: ₦{amount_paid} - ₦{deposit_fee} = ₦{amount_to_credit}')
+                        return jsonify({'success': False, 'message': 'Amount too small to process'}), 400
+                    
+                    new_balance = wallet.get('balance', 0.0) + amount_to_credit
+                    
+                    mongo.db.vas_wallets.update_one(
+                        {'userId': ObjectId(user_id)},
+                        {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+                    )
+                    
+                    transaction = {
                         '_id': ObjectId(),
-                        'type': 'SERVICE_FEE',
-                        'category': 'DEPOSIT_FEE',
-                        'amount': deposit_fee,
                         'userId': ObjectId(user_id),
-                        'relatedTransaction': transaction_reference,
-                        'description': f'Deposit fee from user {user_id}',
-                        'status': 'RECORDED',
-                        'createdAt': datetime.utcnow(),
-                        'metadata': {
-                            'amountPaid': amount_paid,
-                            'amountCredited': amount_to_credit,
-                            'isPremium': is_premium
-                        }
+                        'type': 'WALLET_FUNDING',
+                        'amount': amount_to_credit,
+                        'amountPaid': amount_paid,
+                        'depositFee': deposit_fee,
+                        'reference': transaction_reference,
+                        'status': 'SUCCESS',
+                        'provider': 'monnify',
+                        'metadata': transaction_data,
+                        'createdAt': datetime.utcnow()
                     }
-                    mongo.db.corporate_revenue.insert_one(corporate_revenue)
-                    print(f'💰 Corporate revenue recorded: ₦{deposit_fee} from user {user_id}')
+                    
+                    mongo.db.vas_transactions.insert_one(transaction)
+                    
+                    # Record corporate revenue (₦30 fee)
+                    if deposit_fee > 0:
+                        corporate_revenue = {
+                            '_id': ObjectId(),
+                            'type': 'SERVICE_FEE',
+                            'category': 'DEPOSIT_FEE',
+                            'amount': deposit_fee,
+                            'userId': ObjectId(user_id),
+                            'relatedTransaction': transaction_reference,
+                            'description': f'Deposit fee from user {user_id}',
+                            'status': 'RECORDED',
+                            'createdAt': datetime.utcnow(),
+                            'metadata': {
+                                'amountPaid': amount_paid,
+                                'amountCredited': amount_to_credit,
+                                'isPremium': is_premium
+                            }
+                        }
+                        mongo.db.corporate_revenue.insert_one(corporate_revenue)
+                        print(f'💰 Corporate revenue recorded: ₦{deposit_fee} from user {user_id}')
+                    
+                    print(f'✅ Reserved Account Wallet Funding: User {user_id}, Paid: ₦{amount_paid}, Fee: ₦{deposit_fee}, Credited: ₦{amount_to_credit}, New Balance: ₦{new_balance}')
+                    return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
                 
-                print(f'✅ Wallet funded: User {user_id}, Paid: ₦{amount_paid}, Fee: ₦{deposit_fee}, Credited: ₦{amount_to_credit}, New Balance: ₦{new_balance}')
-                return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
+                else:
+                    print(f'⚠️ Invalid transaction reference format: {transaction_reference}')
+                    return jsonify({'success': False, 'message': 'Invalid transaction reference'}), 400
             
             return jsonify({'success': True, 'message': 'Event received'}), 200
             
