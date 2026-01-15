@@ -1387,11 +1387,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 ],
                 'message': 'Default data networks list'
             }), 200
-                        {'id': 'glo', 'name': 'Glo'},
-                        {'id': '9mobile', 'name': '9mobile'}
-                    ],
-                    'message': 'Default networks list'
-                }), 200
         except Exception as e:
             print(f'⚠️ Error getting networks: {str(e)}')
             return jsonify({
