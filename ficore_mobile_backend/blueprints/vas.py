@@ -43,6 +43,137 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     BVN_VERIFICATION_COST = 10.0
     NIN_VERIFICATION_COST = 60.0
     
+    # ==================== DIAGNOSTIC ENDPOINTS ====================
+    
+    @vas_bp.route('/diagnostic/peyflex-test', methods=['GET'])
+    @token_required
+    def diagnostic_peyflex_test(current_user):
+        """Diagnostic endpoint to test Peyflex API configuration"""
+        try:
+            # Only allow admin users to access this endpoint
+            if not current_user.get('isAdmin', False):
+                return jsonify({
+                    'success': False,
+                    'message': 'Admin access required'
+                }), 403
+            
+            diagnostic_results = {
+                'timestamp': datetime.utcnow().isoformat(),
+                'environment_check': {},
+                'api_tests': [],
+                'recommendations': []
+            }
+            
+            # Environment check
+            diagnostic_results['environment_check'] = {
+                'PEYFLEX_BASE_URL': PEYFLEX_BASE_URL,
+                'PEYFLEX_API_TOKEN_SET': bool(PEYFLEX_API_TOKEN),
+                'PEYFLEX_API_TOKEN_LENGTH': len(PEYFLEX_API_TOKEN) if PEYFLEX_API_TOKEN else 0,
+                'PEYFLEX_API_TOKEN_PREVIEW': f"{PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}" if PEYFLEX_API_TOKEN and len(PEYFLEX_API_TOKEN) > 14 else "NOT_SET"
+            }
+            
+            # Test different endpoints
+            test_endpoints = [
+                {
+                    'name': 'Data Plans - MTN SME',
+                    'url': f'{PEYFLEX_BASE_URL}/api/data/plans/?network=mtn_sme_data',
+                    'method': 'GET'
+                },
+                {
+                    'name': 'Data Networks',
+                    'url': f'{PEYFLEX_BASE_URL}/api/data/networks/',
+                    'method': 'GET'
+                }
+            ]
+            
+            for test in test_endpoints:
+                test_result = {
+                    'name': test['name'],
+                    'url': test['url'],
+                    'method': test['method']
+                }
+                
+                try:
+                    headers = {
+                        'User-Agent': 'FiCore-Backend/1.0 (Nigeria; Python-Requests)',
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }
+                    
+                    if PEYFLEX_API_TOKEN:
+                        headers['Authorization'] = f'Token {PEYFLEX_API_TOKEN}'
+                    
+                    response = requests.get(test['url'], headers=headers, timeout=15)
+                    
+                    test_result.update({
+                        'status_code': response.status_code,
+                        'success': response.status_code == 200,
+                        'response_headers': dict(response.headers),
+                        'response_size': len(response.text),
+                        'response_preview': response.text[:500],
+                        'is_json': False,
+                        'is_html': '<!DOCTYPE html>' in response.text or '<html' in response.text
+                    })
+                    
+                    # Try to parse JSON
+                    try:
+                        json_data = response.json()
+                        test_result['is_json'] = True
+                        test_result['json_type'] = type(json_data).__name__
+                        if isinstance(json_data, list):
+                            test_result['json_length'] = len(json_data)
+                        elif isinstance(json_data, dict):
+                            test_result['json_keys'] = list(json_data.keys())
+                    except:
+                        pass
+                    
+                except Exception as e:
+                    test_result.update({
+                        'success': False,
+                        'error': str(e),
+                        'error_type': type(e).__name__
+                    })
+                
+                diagnostic_results['api_tests'].append(test_result)
+            
+            # Generate recommendations
+            recommendations = []
+            
+            if not PEYFLEX_API_TOKEN:
+                recommendations.append("❌ PEYFLEX_API_TOKEN environment variable is not set")
+            
+            for test in diagnostic_results['api_tests']:
+                if not test.get('success', False):
+                    status_code = test.get('status_code')
+                    if status_code == 403:
+                        recommendations.append(f"🚨 403 Forbidden on {test['name']} - Check API token validity and IP whitelist")
+                    elif status_code == 404:
+                        recommendations.append(f"🚨 404 Not Found on {test['name']} - API endpoint may have changed")
+                    elif status_code == 429:
+                        recommendations.append(f"🚨 429 Rate Limited on {test['name']} - Implement rate limiting")
+                    elif 'error' in test:
+                        recommendations.append(f"🚨 Connection error on {test['name']}: {test['error']}")
+                
+                if test.get('is_html', False):
+                    recommendations.append(f"⚠️ {test['name']} returned HTML instead of JSON - API may be down or blocked")
+            
+            if not recommendations:
+                recommendations.append("✅ All tests passed - Peyflex API appears to be working correctly")
+            
+            diagnostic_results['recommendations'] = recommendations
+            
+            return jsonify({
+                'success': True,
+                'data': diagnostic_results,
+                'message': 'Peyflex API diagnostic completed'
+            }), 200
+            
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'message': f'Diagnostic failed: {str(e)}'
+            }), 500
+
     # ==================== PRICING ENDPOINTS ====================
     
     @vas_bp.route('/pricing/calculate', methods=['POST'])
@@ -2699,54 +2830,116 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     
     @vas_bp.route('/data-plans/<network>', methods=['GET'])
     def get_data_plans(network):
-        """Get data plans for a specific network"""
+        """Get data plans for a specific network with comprehensive logging"""
         try:
+            # 🔍 ENHANCED LOGGING: Environment check
+            print(f'🔧 Environment Check:')
+            print(f'   PEYFLEX_BASE_URL: {PEYFLEX_BASE_URL}')
+            print(f'   PEYFLEX_API_TOKEN: {"SET" if PEYFLEX_API_TOKEN else "NOT SET"}')
+            if PEYFLEX_API_TOKEN:
+                print(f'   Token Length: {len(PEYFLEX_API_TOKEN)} chars')
+                print(f'   Token Preview: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
+            
             # Network should be full ID like 'mtn_sme_data', not just 'mtn'
             url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={network.lower()}'
             print(f'🔍 Fetching data plans from: {url}')
             
-            response = requests.get(url, timeout=10)
+            # 🔍 ENHANCED LOGGING: Request details
+            headers = {}
+            if PEYFLEX_API_TOKEN:
+                headers['Authorization'] = f'Token {PEYFLEX_API_TOKEN}'
+            
+            headers.update({
+                'User-Agent': 'FiCore-Backend/1.0 (Nigeria; Python-Requests)',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            })
+            
+            print(f'📤 Request Headers: {dict(headers)}')
+            
+            response = requests.get(url, headers=headers, timeout=15)
             
             print(f'📡 Peyflex response status: {response.status_code}')
-            print(f'📡 Peyflex response body: {response.text[:500]}')
+            print(f'📡 Peyflex response headers: {dict(response.headers)}')
+            print(f'📡 Peyflex response body: {response.text[:1000]}')
+            
+            # 🔍 ENHANCED LOGGING: Detailed error analysis
+            if response.status_code == 403:
+                print(f'🚨 403 FORBIDDEN ERROR ANALYSIS:')
+                print(f'   - This suggests authentication/authorization issues')
+                print(f'   - API token may be invalid, expired, or not whitelisted')
+                print(f'   - Server IP may not be authorized')
+                print(f'   - Check if Peyflex requires registration/approval')
+                
+            elif response.status_code == 404:
+                print(f'🚨 404 NOT FOUND ERROR:')
+                print(f'   - API endpoint may have changed')
+                print(f'   - Network parameter may be invalid: {network}')
+                
+            elif response.status_code == 429:
+                print(f'🚨 429 RATE LIMIT ERROR:')
+                print(f'   - Too many requests to Peyflex API')
+                print(f'   - Need to implement rate limiting')
             
             if response.status_code == 200:
-                plans_data = response.json()
-                
-                # Check if Peyflex returned empty array
-                if isinstance(plans_data, list) and len(plans_data) == 0:
-                    print(f'⚠️ Peyflex returned empty array for {network}')
-                    print(f'⚠️ Using fallback data plans')
-                    plans_data = _get_fallback_data_plans(network)
-                
-                # Transform plan structure to ensure consistency
-                # Peyflex uses 'plan_code' but we need 'id' for frontend
-                transformed_plans = []
-                for plan in plans_data:
-                    transformed_plan = {
-                        'id': plan.get('plan_code', plan.get('id', '')),
-                        'name': plan.get('name', plan.get('plan_name', '')),
-                        'price': plan.get('price', plan.get('amount', 0)),
-                        'validity': plan.get('validity', plan.get('validity_days', 30)),
-                        'plan_code': plan.get('plan_code', plan.get('id', '')),
-                    }
-                    transformed_plans.append(transformed_plan)
-                
-                print(f'✅ Returning {len(transformed_plans)} data plans for {network}')
-                
-                return jsonify({
-                    'success': True,
-                    'data': transformed_plans,
-                    'message': 'Data plans retrieved successfully'
-                }), 200
+                try:
+                    plans_data = response.json()
+                    print(f'✅ Successfully parsed JSON response')
+                    print(f'📊 Response type: {type(plans_data)}')
+                    
+                    if isinstance(plans_data, list):
+                        print(f'📊 Plans array length: {len(plans_data)}')
+                        if len(plans_data) == 0:
+                            print(f'⚠️ Peyflex returned empty array for {network}')
+                            print(f'⚠️ Using Dynamic Pricing Engine fallback')
+                            plans_data = _get_fallback_data_plans(network)
+                    elif isinstance(plans_data, dict):
+                        print(f'📊 Response keys: {list(plans_data.keys())}')
+                        # Handle different response formats
+                        if 'data' in plans_data:
+                            plans_data = plans_data['data']
+                        elif 'plans' in plans_data:
+                            plans_data = plans_data['plans']
+                    
+                    # Transform plan structure to ensure consistency
+                    transformed_plans = []
+                    for plan in plans_data:
+                        if isinstance(plan, dict):
+                            transformed_plan = {
+                                'id': plan.get('plan_code', plan.get('id', '')),
+                                'name': plan.get('name', plan.get('plan_name', '')),
+                                'price': plan.get('price', plan.get('amount', 0)),
+                                'validity': plan.get('validity', plan.get('validity_days', 30)),
+                                'plan_code': plan.get('plan_code', plan.get('id', '')),
+                            }
+                            transformed_plans.append(transformed_plan)
+                    
+                    print(f'✅ Returning {len(transformed_plans)} data plans for {network}')
+                    
+                    return jsonify({
+                        'success': True,
+                        'data': transformed_plans,
+                        'message': 'Data plans retrieved successfully from Peyflex API'
+                    }), 200
+                    
+                except json.JSONDecodeError as e:
+                    print(f'❌ JSON decode error: {str(e)}')
+                    print(f'📄 Raw response: {response.text}')
+                    print(f'⚠️ Using Dynamic Pricing Engine fallback')
+                    fallback_plans = _get_fallback_data_plans(network)
+                    return jsonify({
+                        'success': True,
+                        'data': fallback_plans,
+                        'message': 'Using Dynamic Pricing Engine fallback (JSON decode error)'
+                    }), 200
             else:
                 print(f'❌ Peyflex returned error: {response.status_code} - {response.text}')
-                print(f'⚠️ Using fallback data plans')
+                print(f'⚠️ Using Dynamic Pricing Engine fallback')
                 fallback_plans = _get_fallback_data_plans(network)
                 return jsonify({
                     'success': True,
                     'data': fallback_plans,
-                    'message': 'Using fallback data plans'
+                    'message': f'Using Dynamic Pricing Engine fallback (HTTP {response.status_code})'
                 }), 200
         except Exception as e:
             print(f'❌ Error getting data plans: {str(e)}')
@@ -2761,60 +2954,82 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }), 200
     
     def _get_fallback_data_plans(network):
-        """Return fallback data plans when Peyflex API fails or returns empty"""
+        """
+        Return fallback data plans using the Dynamic Pricing Engine
+        CRITICAL: Uses formula-based pricing instead of hardcoded prices
+        """
+        try:
+            # Import the dynamic pricing engine
+            from utils.dynamic_pricing_engine import get_pricing_engine
+            
+            # Get pricing engine instance
+            pricing_engine = get_pricing_engine(mongo)
+            
+            # Get cached rates from pricing engine (includes emergency fallback logic)
+            rates = pricing_engine.get_peyflex_rates('data', network)
+            
+            # Convert pricing engine format to our API format
+            fallback_plans = []
+            
+            for plan_id, plan_data in rates.items():
+                # Skip if plan_data is not a dict (handles edge cases)
+                if not isinstance(plan_data, dict):
+                    continue
+                    
+                fallback_plans.append({
+                    'id': plan_id,
+                    'name': plan_data.get('name', f'{plan_id} Data Plan'),
+                    'price': plan_data.get('price', 0),
+                    'validity': plan_data.get('validity', 30),
+                    'plan_code': plan_id
+                })
+            
+            # If we got plans from the engine, return them
+            if fallback_plans:
+                print(f'✅ Using Dynamic Pricing Engine fallback for {network}: {len(fallback_plans)} plans')
+                return fallback_plans
+            
+            # If pricing engine also failed, use minimal emergency plans
+            print(f'⚠️ Dynamic Pricing Engine also failed, using minimal emergency plans for {network}')
+            return _get_minimal_emergency_plans(network)
+            
+        except Exception as e:
+            print(f'❌ Error using Dynamic Pricing Engine: {str(e)}')
+            print(f'⚠️ Falling back to minimal emergency plans for {network}')
+            return _get_minimal_emergency_plans(network)
+
+    def _get_minimal_emergency_plans(network):
+        """
+        Minimal emergency plans with intentionally HIGH prices to prevent losses
+        Only used when both Peyflex API and Dynamic Pricing Engine fail
+        """
         network_lower = network.lower()
         
-        # MTN SME Data Plans (most popular)
-        if 'mtn_sme' in network_lower or network_lower == 'mtn':
+        # High-priced emergency plans to prevent losses during total system failure
+        if 'mtn' in network_lower:
             return [
-                {'id': 'M500MBS', 'name': '500MB - 30 Days', 'price': 140, 'validity': 30, 'plan_code': 'M500MBS'},
-                {'id': 'M1GB', 'name': '1GB - 30 Days', 'price': 270, 'validity': 30, 'plan_code': 'M1GB'},
-                {'id': 'M2GB', 'name': '2GB - 30 Days', 'price': 540, 'validity': 30, 'plan_code': 'M2GB'},
-                {'id': 'M3GB', 'name': '3GB - 30 Days', 'price': 810, 'validity': 30, 'plan_code': 'M3GB'},
-                {'id': 'M5GB', 'name': '5GB - 30 Days', 'price': 1350, 'validity': 30, 'plan_code': 'M5GB'},
-                {'id': 'M10GB', 'name': '10GB - 30 Days', 'price': 2700, 'validity': 30, 'plan_code': 'M10GB'},
+                {'id': 'EMERGENCY_MTN_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 800, 'validity': 30, 'plan_code': 'EMERGENCY_MTN_1GB'},
+                {'id': 'EMERGENCY_MTN_2GB', 'name': '2GB - 30 Days (Emergency)', 'price': 1500, 'validity': 30, 'plan_code': 'EMERGENCY_MTN_2GB'},
             ]
-        
-        # MTN Gifting Data Plans
-        elif 'mtn_gifting' in network_lower:
-            return [
-                {'id': 'MTN_GIFT_500MB', 'name': '500MB - 30 Days', 'price': 150, 'validity': 30, 'plan_code': 'MTN_GIFT_500MB'},
-                {'id': 'MTN_GIFT_1GB', 'name': '1GB - 30 Days', 'price': 280, 'validity': 30, 'plan_code': 'MTN_GIFT_1GB'},
-                {'id': 'MTN_GIFT_2GB', 'name': '2GB - 30 Days', 'price': 560, 'validity': 30, 'plan_code': 'MTN_GIFT_2GB'},
-                {'id': 'MTN_GIFT_5GB', 'name': '5GB - 30 Days', 'price': 1400, 'validity': 30, 'plan_code': 'MTN_GIFT_5GB'},
-            ]
-        
-        # Airtel Data Plans
         elif 'airtel' in network_lower:
             return [
-                {'id': 'AIRTEL_500MB', 'name': '500MB - 30 Days', 'price': 150, 'validity': 30, 'plan_code': 'AIRTEL_500MB'},
-                {'id': 'AIRTEL_1GB', 'name': '1GB - 30 Days', 'price': 300, 'validity': 30, 'plan_code': 'AIRTEL_1GB'},
-                {'id': 'AIRTEL_2GB', 'name': '2GB - 30 Days', 'price': 600, 'validity': 30, 'plan_code': 'AIRTEL_2GB'},
-                {'id': 'AIRTEL_5GB', 'name': '5GB - 30 Days', 'price': 1500, 'validity': 30, 'plan_code': 'AIRTEL_5GB'},
+                {'id': 'EMERGENCY_AIRTEL_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 900, 'validity': 30, 'plan_code': 'EMERGENCY_AIRTEL_1GB'},
+                {'id': 'EMERGENCY_AIRTEL_2GB', 'name': '2GB - 30 Days (Emergency)', 'price': 1600, 'validity': 30, 'plan_code': 'EMERGENCY_AIRTEL_2GB'},
             ]
-        
-        # Glo Data Plans
         elif 'glo' in network_lower:
             return [
-                {'id': 'GLO_500MB', 'name': '500MB - 30 Days', 'price': 150, 'validity': 30, 'plan_code': 'GLO_500MB'},
-                {'id': 'GLO_1GB', 'name': '1GB - 30 Days', 'price': 300, 'validity': 30, 'plan_code': 'GLO_1GB'},
-                {'id': 'GLO_2GB', 'name': '2GB - 30 Days', 'price': 600, 'validity': 30, 'plan_code': 'GLO_2GB'},
-                {'id': 'GLO_5GB', 'name': '5GB - 30 Days', 'price': 1500, 'validity': 30, 'plan_code': 'GLO_5GB'},
+                {'id': 'EMERGENCY_GLO_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 850, 'validity': 30, 'plan_code': 'EMERGENCY_GLO_1GB'},
+                {'id': 'EMERGENCY_GLO_2GB', 'name': '2GB - 30 Days (Emergency)', 'price': 1550, 'validity': 30, 'plan_code': 'EMERGENCY_GLO_2GB'},
             ]
-        
-        # 9mobile Data Plans
         elif '9mobile' in network_lower:
             return [
-                {'id': '9MOB_500MB', 'name': '500MB - 30 Days', 'price': 150, 'validity': 30, 'plan_code': '9MOB_500MB'},
-                {'id': '9MOB_1GB', 'name': '1GB - 30 Days', 'price': 300, 'validity': 30, 'plan_code': '9MOB_1GB'},
-                {'id': '9MOB_2GB', 'name': '2GB - 30 Days', 'price': 600, 'validity': 30, 'plan_code': '9MOB_2GB'},
-                {'id': '9MOB_5GB', 'name': '5GB - 30 Days', 'price': 1500, 'validity': 30, 'plan_code': '9MOB_5GB'},
+                {'id': 'EMERGENCY_9MOB_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 850, 'validity': 30, 'plan_code': 'EMERGENCY_9MOB_1GB'},
+                {'id': 'EMERGENCY_9MOB_2GB', 'name': '2GB - 30 Days (Emergency)', 'price': 1550, 'validity': 30, 'plan_code': 'EMERGENCY_9MOB_2GB'},
             ]
         
-        # Default fallback
+        # Default emergency fallback
         return [
-            {'id': 'DEFAULT_1GB', 'name': '1GB - 30 Days', 'price': 300, 'validity': 30, 'plan_code': 'DEFAULT_1GB'},
-            {'id': 'DEFAULT_2GB', 'name': '2GB - 30 Days', 'price': 600, 'validity': 30, 'plan_code': 'DEFAULT_2GB'},
+            {'id': 'EMERGENCY_DEFAULT_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 1000, 'validity': 30, 'plan_code': 'EMERGENCY_DEFAULT_1GB'},
         ]
     
     @vas_bp.route('/transactions/all', methods=['GET'])
