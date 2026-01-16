@@ -1844,18 +1844,20 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 if event_type == 'SUCCESSFUL_TRANSACTION' and 'eventData' in data:
                     # Old format with eventData wrapper
                     transaction_data = data['eventData']
-                    account_reference = transaction_data.get('accountReference', '')
+                    account_reference = transaction_data.get('product', {}).get('reference', '')
                     amount_paid = float(transaction_data.get('amountPaid', 0))
                     transaction_reference = transaction_data.get('transactionReference', '')
                     payment_reference = transaction_data.get('paymentReference', '')
+                    customer_email = transaction_data.get('customer', {}).get('email', '')
                 else:
                     # New flat format
                     account_reference = data.get('accountReference', '')
                     amount_paid = float(data.get('amountPaid', 0))
                     transaction_reference = data.get('transactionReference', '')
                     payment_reference = data.get('paymentReference', '')
+                    customer_email = data.get('customerEmail', '')
                 
-                print(f'💳 Processing payment: Ref={transaction_reference}, PayRef={payment_reference}, AccRef={account_reference}, Amount=₦{amount_paid}')
+                print(f'💳 Processing payment: Ref={transaction_reference}, PayRef={payment_reference}, AccRef={account_reference}, Email={customer_email}, Amount=₦{amount_paid}')
                 
                 # Handle Quick Pay transactions first
                 # First try to find by Monnify transaction reference
@@ -1900,7 +1902,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                         return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
                     
                     # NEW: Try to find user by customer email if no accountReference
-                    customer_email = data.get('customerEmail', '')
                     if customer_email:
                         print(f'🔍 No accountReference, trying to find user by email: {customer_email}')
                         user = mongo.db.users.find_one({'email': customer_email})
@@ -1922,6 +1923,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                             return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
                         else:
                             print(f'❌ User not found with email: {customer_email}')
+                    else:
+                        print(f'❌ No customer email found in webhook data')
                     
                     print(f'❌ Transaction not found and could not identify user: {transaction_reference}')
                     return jsonify({'success': False, 'message': 'Transaction not found'}), 404
