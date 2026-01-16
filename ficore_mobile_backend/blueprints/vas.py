@@ -443,10 +443,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'message': 'Failed to execute scheduled recovery',
                 'errors': {'general': [str(e)]}
             }), 500
-                'success': False,
-                'message': 'Failed to trigger recovery job',
-                'errors': {'general': [str(e)]}
-            }), 500
 
     # ==================== HELPER FUNCTIONS ====================
     
