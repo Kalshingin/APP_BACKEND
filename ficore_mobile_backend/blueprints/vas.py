@@ -45,6 +45,44 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     
     # ==================== DIAGNOSTIC ENDPOINTS ====================
     
+    @vas_bp.route('/diagnostic/peyflex-connection', methods=['GET'])
+    @token_required
+    def diagnostic_peyflex_connection(current_user):
+        """Test Peyflex connection with different strategies"""
+        try:
+            # Only allow admin users
+            if not current_user.get('isAdmin', False):
+                return jsonify({
+                    'success': False,
+                    'message': 'Admin access required'
+                }), 403
+            
+            from utils.dynamic_pricing_engine import get_pricing_engine
+            
+            # Test the pricing engine connection strategies
+            pricing_engine = get_pricing_engine(mongo.db)
+            
+            # Test data rates fetch
+            test_result = pricing_engine._fetch_data_rates('mtn_sme_data')
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'test_network': 'mtn_sme_data',
+                    'rates_found': len(test_result) if isinstance(test_result, dict) else 0,
+                    'sample_rates': dict(list(test_result.items())[:3]) if isinstance(test_result, dict) else test_result,
+                    'timestamp': datetime.utcnow().isoformat()
+                },
+                'message': 'Peyflex connection test completed'
+            }), 200
+            
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'message': f'Connection test failed: {str(e)}',
+                'error_type': type(e).__name__
+            }), 500
+
     @vas_bp.route('/diagnostic/peyflex-test', methods=['GET'])
     @token_required
     def diagnostic_peyflex_test(current_user):
