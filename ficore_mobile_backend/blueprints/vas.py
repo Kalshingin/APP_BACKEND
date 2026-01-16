@@ -15,6 +15,7 @@ import requests
 import hmac
 import hashlib
 import uuid
+import json
 from utils.email_service import get_email_service
 from utils.dynamic_pricing_engine import get_pricing_engine, calculate_vas_price
 from utils.emergency_pricing_recovery import tag_emergency_transaction
@@ -1700,6 +1701,103 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     @vas_bp.route('/wallet/webhook', methods=['POST'])
     def monnify_webhook():
         """Handle Monnify webhook with HMAC-SHA512 signature verification"""
+        
+        def process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, webhook_data):
+            """Process reserved account funding inline"""
+            try:
+                wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                if not wallet:
+                    print(f'❌ Wallet not found for user: {user_id}')
+                    return jsonify({'success': False, 'message': 'Wallet not found'}), 404
+                
+                # Check if user is premium (no deposit fee)
+                user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+                is_premium = user.get('subscriptionStatus') == 'active' if user else False
+                
+                # Apply deposit fee (₦30 for non-premium users)
+                deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
+                amount_to_credit = amount_paid - deposit_fee
+                
+                # Ensure we don't credit negative amounts
+                if amount_to_credit <= 0:
+                    print(f'⚠️ Amount too small after fee: ₦{amount_paid} - ₦{deposit_fee} = ₦{amount_to_credit}')
+                    return jsonify({'success': False, 'message': 'Amount too small to process'}), 400
+                
+                new_balance = wallet.get('balance', 0.0) + amount_to_credit
+                
+                mongo.db.vas_wallets.update_one(
+                    {'userId': ObjectId(user_id)},
+                    {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+                )
+                
+                transaction = {
+                    '_id': ObjectId(),
+                    'userId': ObjectId(user_id),
+                    'type': 'WALLET_FUNDING',
+                    'amount': amount_to_credit,
+                    'amountPaid': amount_paid,
+                    'depositFee': deposit_fee,
+                    'reference': transaction_reference,
+                    'status': 'SUCCESS',
+                    'provider': 'monnify',
+                    'metadata': webhook_data,
+                    'createdAt': datetime.utcnow()
+                }
+                
+                mongo.db.vas_transactions.insert_one(transaction)
+                
+                # Record corporate revenue (₦30 fee)
+                if deposit_fee > 0:
+                    corporate_revenue = {
+                        '_id': ObjectId(),
+                        'type': 'SERVICE_FEE',
+                        'category': 'DEPOSIT_FEE',
+                        'amount': deposit_fee,
+                        'userId': ObjectId(user_id),
+                        'relatedTransaction': transaction_reference,
+                        'description': f'Deposit fee from user {user_id}',
+                        'status': 'RECORDED',
+                        'createdAt': datetime.utcnow(),
+                        'metadata': {
+                            'amountPaid': amount_paid,
+                            'amountCredited': amount_to_credit,
+                            'isPremium': is_premium
+                        }
+                    }
+                    mongo.db.corporate_revenue.insert_one(corporate_revenue)
+                    print(f'💰 Corporate revenue recorded: ₦{deposit_fee} from user {user_id}')
+                
+                # Send notification
+                try:
+                    notification_id = create_user_notification(
+                        mongo=mongo,
+                        user_id=user_id,
+                        category='wallet',
+                        title='💰 Wallet Funded Successfully',
+                        body=f'₦{amount_to_credit:,.2f} added to your Liquid Wallet. New balance: ₦{new_balance:,.2f}',
+                        related_id=transaction_reference,
+                        metadata={
+                            'transaction_type': 'WALLET_FUNDING',
+                            'amount_credited': amount_to_credit,
+                            'deposit_fee': deposit_fee,
+                            'new_balance': new_balance,
+                            'is_premium': is_premium
+                        },
+                        priority='normal'
+                    )
+                    
+                    if notification_id:
+                        print(f'🔔 Wallet funding notification created: {notification_id}')
+                except Exception as e:
+                    print(f'⚠️ Failed to create notification: {str(e)}')
+                
+                print(f'✅ Wallet Funding: User {user_id}, Paid: ₦{amount_paid}, Fee: ₦{deposit_fee}, Credited: ₦{amount_to_credit}, New Balance: ₦{new_balance}')
+                return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
+                
+            except Exception as e:
+                print(f'❌ Error processing wallet funding: {str(e)}')
+                return jsonify({'success': False, 'message': 'Processing failed'}), 500
+        
         try:
             # Optional: IP Whitelisting (uncomment for production)
             # Monnify webhook IP: 35.242.133.146
@@ -1724,26 +1822,56 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 return jsonify({'success': False, 'message': 'Invalid signature'}), 401
             
             data = request.json
+            
+            # Log the raw webhook data for debugging
+            print(f'📥 Raw Monnify webhook data: {json.dumps(data, indent=2)}')
+            
+            # Handle both old eventType format and new flat format
             event_type = data.get('eventType')
+            payment_status = data.get('paymentStatus', '').upper()
+            completed = data.get('completed', False)
             
-            print(f'📥 Monnify webhook received: {event_type}')
+            print(f'📥 Monnify webhook - EventType: {event_type}, Status: {payment_status}, Completed: {completed}')
             
-            if event_type == 'SUCCESSFUL_TRANSACTION':
-                transaction_data = data.get('eventData', {})
-                account_reference = transaction_data.get('accountReference', '')
-                amount_paid = float(transaction_data.get('amountPaid', 0))
-                transaction_reference = transaction_data.get('transactionReference', '')
+            # Process if it's a successful transaction (either format)
+            should_process = (
+                (event_type == 'SUCCESSFUL_TRANSACTION') or 
+                (payment_status == 'PAID' and completed)
+            )
+            
+            if should_process:
+                # Extract transaction details - handle both old eventData format and new flat format
+                if event_type == 'SUCCESSFUL_TRANSACTION' and 'eventData' in data:
+                    # Old format with eventData wrapper
+                    transaction_data = data['eventData']
+                    account_reference = transaction_data.get('accountReference', '')
+                    amount_paid = float(transaction_data.get('amountPaid', 0))
+                    transaction_reference = transaction_data.get('transactionReference', '')
+                    payment_reference = transaction_data.get('paymentReference', '')
+                else:
+                    # New flat format
+                    account_reference = data.get('accountReference', '')
+                    amount_paid = float(data.get('amountPaid', 0))
+                    transaction_reference = data.get('transactionReference', '')
+                    payment_reference = data.get('paymentReference', '')
                 
-                print(f'💳 Processing payment: Ref={transaction_reference}, Amount=₦{amount_paid}')
+                print(f'💳 Processing payment: Ref={transaction_reference}, PayRef={payment_reference}, AccRef={account_reference}, Amount=₦{amount_paid}')
                 
-                # Handle Quick Pay transactions
-                # First try to find by Monnify transaction reference (new method)
+                # Handle Quick Pay transactions first
+                # First try to find by Monnify transaction reference
                 pending_txn = mongo.db.vas_transactions.find_one({
                     'monnifyTransactionReference': transaction_reference,
                     'status': 'PENDING_PAYMENT'
                 })
                 
-                # Fallback: try to find by our transaction reference (old method)
+                # Fallback: try to find by payment reference if it's our format
+                if not pending_txn and payment_reference and payment_reference.startswith('FICORE_QP_'):
+                    pending_txn = mongo.db.vas_transactions.find_one({
+                        'transactionReference': payment_reference,
+                        'status': 'PENDING_PAYMENT'
+                    })
+                
+                # Another fallback: try to find by our transaction reference format
                 if not pending_txn and transaction_reference.startswith('FICORE_QP_'):
                     pending_txn = mongo.db.vas_transactions.find_one({
                         'transactionReference': transaction_reference,
@@ -1751,7 +1879,51 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     })
                 
                 if not pending_txn:
-                    print(f'⚠️ No pending transaction found for Monnify ref: {transaction_reference}')
+                    print(f'⚠️ No pending transaction found for refs: {transaction_reference}, {payment_reference}')
+                    
+                    # Check if this is a reserved account transaction (direct bank transfer)
+                    if account_reference and account_reference.startswith('FICORE_'):
+                        print(f'🏦 Processing reserved account transaction: {account_reference}')
+                        user_id = account_reference.replace('FICORE_', '')
+                        
+                        # Check for duplicate webhook (idempotency)
+                        existing_txn = mongo.db.vas_transactions.find_one({
+                            'reference': transaction_reference,
+                            'type': 'WALLET_FUNDING'
+                        })
+                        
+                        if existing_txn:
+                            print(f'⚠️ Duplicate webhook ignored: {transaction_reference}')
+                            return jsonify({'success': True, 'message': 'Already processed'}), 200
+                        
+                        # Process reserved account funding
+                        return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
+                    
+                    # NEW: Try to find user by customer email if no accountReference
+                    customer_email = data.get('customerEmail', '')
+                    if customer_email:
+                        print(f'🔍 No accountReference, trying to find user by email: {customer_email}')
+                        user = mongo.db.users.find_one({'email': customer_email})
+                        if user:
+                            user_id = str(user['_id'])
+                            print(f'✅ Found user by email: {customer_email} -> {user_id}')
+                            
+                            # Check for duplicate webhook (idempotency)
+                            existing_txn = mongo.db.vas_transactions.find_one({
+                                'reference': transaction_reference,
+                                'type': 'WALLET_FUNDING'
+                            })
+                            
+                            if existing_txn:
+                                print(f'⚠️ Duplicate webhook ignored: {transaction_reference}')
+                                return jsonify({'success': True, 'message': 'Already processed'}), 200
+                            
+                            # Process as wallet funding
+                            return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
+                        else:
+                            print(f'❌ User not found with email: {customer_email}')
+                    
+                    print(f'❌ Transaction not found and could not identify user: {transaction_reference}')
                     return jsonify({'success': False, 'message': 'Transaction not found'}), 404
                 
                 # Process the pending transaction
@@ -2024,7 +2196,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'reference': transaction_reference,
                     'status': 'SUCCESS',
                     'provider': 'monnify',
-                    'metadata': transaction_data,
+                    'metadata': data,  # Use the full webhook data
                     'createdAt': datetime.utcnow()
                 }
                 
@@ -2083,10 +2255,71 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
             
             else:
-                print(f'⚠️ Invalid transaction reference format: {transaction_reference}')
-                return jsonify({'success': False, 'message': 'Invalid transaction reference'}), 400
+                # Fallback: Handle any PAID transaction that doesn't match above patterns
+                print(f'⚠️ Unmatched PAID transaction - attempting generic wallet funding')
+                
+                # Try to extract user ID from customer email or other fields
+                customer_email = data.get('customerEmail', '')
+                if customer_email:
+                    user = mongo.db.users.find_one({'email': customer_email})
+                    if user:
+                        user_id = str(user['_id'])
+                        print(f'🔍 Found user by email: {customer_email} -> {user_id}')
+                        
+                        # Check for duplicate webhook (idempotency)
+                        existing_txn = mongo.db.vas_transactions.find_one({
+                            'reference': transaction_reference,
+                            'type': 'WALLET_FUNDING'
+                        })
+                        
+                        if existing_txn:
+                            print(f'⚠️ Duplicate webhook ignored: {transaction_reference}')
+                            return jsonify({'success': True, 'message': 'Already processed'}), 200
+                        
+                        # Process as wallet funding
+                        wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                        if wallet:
+                            # Check if user is premium (no deposit fee)
+                            is_premium = user.get('subscriptionStatus') == 'active'
+                            
+                            # Apply deposit fee (₦30 for non-premium users)
+                            deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
+                            amount_to_credit = amount_paid - deposit_fee
+                            
+                            if amount_to_credit > 0:
+                                new_balance = wallet.get('balance', 0.0) + amount_to_credit
+                                
+                                mongo.db.vas_wallets.update_one(
+                                    {'userId': ObjectId(user_id)},
+                                    {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+                                )
+                                
+                                transaction = {
+                                    '_id': ObjectId(),
+                                    'userId': ObjectId(user_id),
+                                    'type': 'WALLET_FUNDING',
+                                    'amount': amount_to_credit,
+                                    'amountPaid': amount_paid,
+                                    'depositFee': deposit_fee,
+                                    'reference': transaction_reference,
+                                    'status': 'SUCCESS',
+                                    'provider': 'monnify',
+                                    'metadata': data,
+                                    'createdAt': datetime.utcnow()
+                                }
+                                
+                                mongo.db.vas_transactions.insert_one(transaction)
+                                
+                                print(f'✅ Generic Wallet Funding: User {user_id}, Paid: ₦{amount_paid}, Credited: ₦{amount_to_credit}, New Balance: ₦{new_balance}')
+                                return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
+                
+                print(f'⚠️ Could not process transaction: {transaction_reference}')
+                return jsonify({'success': False, 'message': 'Could not process transaction'}), 400
             
-            return jsonify({'success': True, 'message': 'Event received'}), 200
+            # If payment status is not PAID or not completed, just acknowledge
+            else:
+                print(f'📥 Webhook received but not processed - Status: {payment_status}, Completed: {completed}')
+                return jsonify({'success': True, 'message': 'Webhook received'}), 200
             
         except Exception as e:
             print(f'❌ Error processing webhook: {str(e)}')
