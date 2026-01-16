@@ -2817,6 +2817,107 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             {'id': 'DEFAULT_2GB', 'name': '2GB - 30 Days', 'price': 600, 'validity': 30, 'plan_code': 'DEFAULT_2GB'},
         ]
     
+    @vas_bp.route('/transactions/all', methods=['GET'])
+    @token_required
+    def get_all_user_transactions(current_user):
+        """Get all user transactions (VAS, Income, Expenses, Credits) in one unified list"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            limit = int(request.args.get('limit', 50))
+            skip = int(request.args.get('skip', 0))
+            
+            all_transactions = []
+            
+            # 1. Get VAS transactions
+            vas_transactions = list(
+                mongo.db.vas_transactions.find({'userId': ObjectId(user_id)})
+                .sort('createdAt', -1)
+            )
+            
+            for txn in vas_transactions:
+                all_transactions.append({
+                    '_id': str(txn['_id']),
+                    'type': 'VAS',
+                    'subtype': txn.get('type', 'UNKNOWN'),
+                    'amount': txn.get('amount', 0),
+                    'amountPaid': txn.get('amountPaid', 0),
+                    'fee': txn.get('depositFee', 0),
+                    'description': f"VAS {txn.get('type', 'Transaction')}",
+                    'reference': txn.get('reference', ''),
+                    'status': txn.get('status', 'UNKNOWN'),
+                    'provider': txn.get('provider', ''),
+                    'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                    'category': 'VAS Services'
+                })
+            
+            # 2. Get Income transactions
+            income_transactions = list(
+                mongo.db.income.find({'userId': ObjectId(user_id)})
+                .sort('date', -1)
+            )
+            
+            for txn in income_transactions:
+                all_transactions.append({
+                    '_id': str(txn['_id']),
+                    'type': 'INCOME',
+                    'subtype': 'INCOME',
+                    'amount': txn.get('amount', 0),
+                    'amountPaid': txn.get('amount', 0),
+                    'fee': 0,
+                    'description': txn.get('description', 'Income'),
+                    'reference': '',
+                    'status': 'SUCCESS',
+                    'provider': '',
+                    'date': txn.get('date', datetime.utcnow()).isoformat() + 'Z',
+                    'category': txn.get('category', 'Income')
+                })
+            
+            # 3. Get Expense transactions
+            expense_transactions = list(
+                mongo.db.expenses.find({'userId': ObjectId(user_id)})
+                .sort('date', -1)
+            )
+            
+            for txn in expense_transactions:
+                all_transactions.append({
+                    '_id': str(txn['_id']),
+                    'type': 'EXPENSE',
+                    'subtype': 'EXPENSE',
+                    'amount': -txn.get('amount', 0),  # Negative for expenses
+                    'amountPaid': txn.get('amount', 0),
+                    'fee': 0,
+                    'description': txn.get('description', 'Expense'),
+                    'reference': '',
+                    'status': 'SUCCESS',
+                    'provider': '',
+                    'date': txn.get('date', datetime.utcnow()).isoformat() + 'Z',
+                    'category': txn.get('category', 'Expense')
+                })
+            
+            # Sort all transactions by date (newest first)
+            all_transactions.sort(key=lambda x: x['date'], reverse=True)
+            
+            # Apply pagination
+            paginated_transactions = all_transactions[skip:skip + limit]
+            
+            return jsonify({
+                'success': True,
+                'data': paginated_transactions,
+                'total': len(all_transactions),
+                'limit': limit,
+                'skip': skip,
+                'message': 'All transactions retrieved successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error getting all transactions: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to retrieve transactions',
+                'errors': {'general': [str(e)]}
+            }), 500
+
     @vas_bp.route('/transactions', methods=['GET'])
     @token_required
     def get_vas_transactions(current_user):
