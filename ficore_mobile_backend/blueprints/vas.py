@@ -2907,11 +2907,12 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             print('🔍 Fetching data networks from Peyflex')
             logger.info(f'User {current_user["_id"]} requesting data networks')
             
-            # Try Peyflex first but with very short timeout
+            # Try Peyflex first but with very short timeout and reliable strategy
             headers = {
                 'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                'Content-Type': 'application/json',
-                'User-Agent': 'FiCore-Backend/1.0'
+                'User-Agent': 'FiCore-Backend/1.0',
+                'Accept': 'application/json',
+                'Connection': 'close'  # Most reliable based on diagnostic
             }
             
             url = f'{PEYFLEX_BASE_URL}/api/data/networks/'
@@ -2939,14 +2940,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             except Exception as api_error:
                 logger.warning(f'Peyflex API failed, using fallback: {api_error}')
             
-            # Always return working fallback networks
+            # Always return working fallback networks (based on real API response)
             networks = [
                 {'id': 'mtn_gifting_data', 'name': 'MTN (Gifting)'},
-                {'id': 'mtn_data_share', 'name': 'MTN (Data Share)'},
-                {'id': 'airtel_data', 'name': 'Airtel'},
-                {'id': 'glo_data', 'name': 'Glo Data'},
-                {'id': '9mobile_data', 'name': '9mobile (CG)'},
-                {'id': '9mobile_gifting', 'name': '9mobile (Gifting)'}
+                {'id': 'glo_data', 'name': 'GLO DATA'},
+                {'id': '9mobile_data', 'name': '9MOBILE (CG)'},
+                {'id': 'airtel_data', 'name': 'Airtel'},  # Common network, should work
+                {'id': 'mtn_data_share', 'name': 'MTN (Data Share)'},  # Alternative MTN
+                {'id': '9mobile_gifting', 'name': '9mobile (Gifting)'}  # Alternative 9mobile
             ]
             
             logger.info(f'✅ Returning fallback networks: {len(networks)} networks')
@@ -2979,12 +2980,13 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             print(f'🔍 Fetching data plans for network: {network}')
             logger.info(f'User {current_user["_id"]} requesting data plans for network: {network}')
             
-            # Try Peyflex first but with very short timeout
+            # Try Peyflex first but with very short timeout and reliable strategy
             try:
                 headers = {
                     'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'FiCore-Backend/1.0'
+                    'User-Agent': 'FiCore-Backend/1.0',
+                    'Accept': 'application/json',
+                    'Connection': 'close'  # Most reliable based on diagnostic
                 }
                 
                 url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={network.lower()}'
@@ -3003,7 +3005,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             except Exception as api_error:
                 logger.warning(f'Peyflex API failed for {network}, using fallback: {api_error}')
             
-            # Emergency fallback plans based on network
+            # Emergency fallback plans based on network (using working endpoints)
             emergency_plans = {
                 'mtn_gifting_data': [
                     {'id': 'mtn_1gb_30d', 'name': '1GB - 30 Days', 'price': 350, 'validity': '30 days'},
@@ -3011,19 +3013,48 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     {'id': 'mtn_5gb_30d', 'name': '5GB - 30 Days', 'price': 1500, 'validity': '30 days'},
                     {'id': 'mtn_10gb_30d', 'name': '10GB - 30 Days', 'price': 3000, 'validity': '30 days'}
                 ],
+                'glo_data': [
+                    # Use real Glo data since that endpoint works
+                    {'id': 'glo_1gb_30d', 'name': '1GB - 30 Days', 'price': 253, 'validity': '30 days'},
+                    {'id': 'glo_2gb_30d', 'name': '2GB - 30 Days', 'price': 295, 'validity': '30 days'},
+                    {'id': 'glo_5gb_30d', 'name': '5GB - 30 Days', 'price': 840, 'validity': '30 days'}
+                ],
                 'airtel_data': [
                     {'id': 'airtel_1gb_30d', 'name': '1GB - 30 Days', 'price': 400, 'validity': '30 days'},
                     {'id': 'airtel_2gb_30d', 'name': '2GB - 30 Days', 'price': 800, 'validity': '30 days'},
                     {'id': 'airtel_5gb_30d', 'name': '5GB - 30 Days', 'price': 1600, 'validity': '30 days'}
                 ],
-                'glo_data': [
-                    {'id': 'glo_1gb_30d', 'name': '1GB - 30 Days', 'price': 380, 'validity': '30 days'},
-                    {'id': 'glo_2gb_30d', 'name': '2GB - 30 Days', 'price': 760, 'validity': '30 days'},
-                    {'id': 'glo_5gb_30d', 'name': '5GB - 30 Days', 'price': 1550, 'validity': '30 days'}
+                '9mobile_data': [
+                    {'id': '9mobile_1gb_30d', 'name': '1GB - 30 Days', 'price': 380, 'validity': '30 days'},
+                    {'id': '9mobile_2gb_30d', 'name': '2GB - 30 Days', 'price': 760, 'validity': '30 days'},
+                    {'id': '9mobile_5gb_30d', 'name': '5GB - 30 Days', 'price': 1550, 'validity': '30 days'}
                 ]
             }
             
-            plans = emergency_plans.get(network, emergency_plans['mtn_gifting_data'])
+            # Special handling for MTN Gifting Data (problematic endpoint)
+            if network == 'mtn_gifting_data':
+                logger.warning(f'MTN Gifting Data endpoint has connection issues, using fallback plans')
+                plans = emergency_plans['mtn_gifting_data']
+            elif network == 'glo_data':
+                # Try to get real Glo data since that endpoint works reliably
+                try:
+                    glo_response = requests.get(f'{PEYFLEX_BASE_URL}/api/data/plans/?network=glo_data', headers=headers, timeout=10)
+                    if glo_response.status_code == 200:
+                        glo_data = glo_response.json()
+                        if 'plans' in glo_data:
+                            logger.info(f'✅ Got real Glo data plans from Peyflex')
+                            return jsonify({
+                                'success': True,
+                                'data': glo_data['plans'],
+                                'message': f'Real Glo data plans from Peyflex',
+                                'source': 'peyflex_api'
+                            }), 200
+                except Exception as glo_error:
+                    logger.warning(f'Glo API failed: {glo_error}')
+                
+                plans = emergency_plans.get('glo_data', emergency_plans['mtn_gifting_data'])
+            else:
+                plans = emergency_plans.get(network, emergency_plans['mtn_gifting_data'])
             
             logger.info(f'✅ Returning emergency fallback plans for {network}: {len(plans)} plans')
             return jsonify({
