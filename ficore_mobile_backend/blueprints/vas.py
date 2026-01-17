@@ -3607,4 +3607,120 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
+    @vas_bp.route('/transactions/<transaction_id>/receipt', methods=['GET'])
+    @token_required
+    def get_vas_transaction_receipt(current_user, transaction_id):
+        """Get VAS transaction receipt for display"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            # Find the transaction
+            transaction = mongo.db.vas_transactions.find_one({
+                '_id': ObjectId(transaction_id),
+                'userId': ObjectId(user_id)
+            })
+            
+            if not transaction:
+                return jsonify({
+                    'success': False,
+                    'message': 'Transaction not found'
+                }), 404
+            
+            # Build receipt data based on transaction type
+            txn_type = transaction.get('type', 'UNKNOWN')
+            amount = transaction.get('amount', 0)
+            status = transaction.get('status', 'UNKNOWN')
+            reference = transaction.get('reference', 'N/A')
+            created_at = transaction.get('createdAt', datetime.utcnow())
+            provider = transaction.get('provider', 'N/A')
+            metadata = transaction.get('metadata', {})
+            
+            receipt_data = {
+                'transactionId': str(transaction['_id']),
+                'type': txn_type,
+                'amount': amount,
+                'status': status,
+                'reference': reference,
+                'provider': provider,
+                'date': created_at.isoformat() + 'Z',
+                'metadata': metadata
+            }
+            
+            # Add type-specific details
+            if txn_type == 'WALLET_FUNDING':
+                receipt_data.update({
+                    'title': 'Wallet Funding Receipt',
+                    'description': f'₦{amount:,.2f} added to your Liquid Wallet',
+                    'details': {
+                        'Amount Paid': f"₦{transaction.get('amountPaid', amount):,.2f}",
+                        'Deposit Fee': f"₦{transaction.get('depositFee', 0):,.2f}",
+                        'Amount Credited': f"₦{amount:,.2f}",
+                        'Payment Method': 'Bank Transfer',
+                        'Provider': provider.title()
+                    }
+                })
+            elif txn_type == 'AIRTIME_PURCHASE':
+                phone = metadata.get('phoneNumber', 'Unknown')
+                network = metadata.get('network', 'Unknown')
+                receipt_data.update({
+                    'title': 'Airtime Purchase Receipt',
+                    'description': f'₦{amount:,.2f} airtime sent successfully',
+                    'details': {
+                        'Phone Number': phone,
+                        'Network': network,
+                        'Amount': f"₦{amount:,.2f}",
+                        'Face Value': f"₦{metadata.get('faceValue', amount):,.2f}",
+                        'Provider': provider.title()
+                    }
+                })
+            elif txn_type == 'DATA_PURCHASE':
+                phone = metadata.get('phoneNumber', 'Unknown')
+                network = metadata.get('network', 'Unknown')
+                plan_name = metadata.get('planName', 'Data Plan')
+                receipt_data.update({
+                    'title': 'Data Purchase Receipt',
+                    'description': f'{plan_name} purchased successfully',
+                    'details': {
+                        'Phone Number': phone,
+                        'Network': network,
+                        'Data Plan': plan_name,
+                        'Amount': f"₦{amount:,.2f}",
+                        'Provider': provider.title()
+                    }
+                })
+            elif txn_type == 'KYC_VERIFICATION':
+                receipt_data.update({
+                    'title': 'KYC Verification Receipt',
+                    'description': 'Account verification completed',
+                    'details': {
+                        'Verification Fee': f"₦{amount:,.2f}",
+                        'Status': 'Verified',
+                        'Provider': provider.title()
+                    }
+                })
+            else:
+                receipt_data.update({
+                    'title': f'{txn_type.replace("_", " ").title()} Receipt',
+                    'description': f'VAS transaction completed',
+                    'details': {
+                        'Amount': f"₦{amount:,.2f}",
+                        'Type': txn_type.replace("_", " ").title(),
+                        'Provider': provider.title()
+                    }
+                })
+            
+            return jsonify({
+                'success': True,
+                'data': receipt_data,
+                'message': 'Transaction receipt retrieved successfully'
+            })
+            
+        except Exception as e:
+            print(f'❌ Error getting VAS receipt: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to retrieve transaction receipt',
+                'errors': {'general': [str(e)]}
+            }), 500
+
     return vas_bp

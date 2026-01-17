@@ -2684,7 +2684,7 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                     'name': 'Monthly Premium',
                     'duration': 30,
                     'durationUnit': 'days',
-                    'amount': 2500.0,
+                    'amount': 1000.0,
                     'currency': 'NGN',
                     'features': [
                         'Unlimited transactions',

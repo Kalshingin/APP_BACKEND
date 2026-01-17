@@ -9,7 +9,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
     @summaries_bp.route('/recent_activity', methods=['GET'])
     @token_required
     def get_recent_activity(current_user):
-        """Get recent user activities across all modules"""
+        """Get recent user activities across all modules (VAS + Business transactions)"""
         try:
             # Validate database connection
             if mongo is None or mongo.db is None:
@@ -24,10 +24,62 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             
             activities = []
             
-            # HYBRID QUERY: Get recent expenses with smart filtering
-            # Shows entries where EITHER:
-            # 1. date is past/present (prevents future inflation)
-            # 2. OR createdAt is within last minute (shows just-created entries immediately)
+            # 1. Get VAS transactions
+            try:
+                vas_transactions = list(mongo.db.vas_transactions.find({
+                    'userId': current_user['_id']
+                }).sort('createdAt', -1).limit(limit))
+                
+                for txn in vas_transactions:
+                    # Create user-friendly description based on transaction type
+                    txn_type = txn.get('type', 'UNKNOWN')
+                    amount = txn.get('amount', 0)
+                    
+                    if txn_type == 'WALLET_FUNDING':
+                        title = 'Wallet Funded'
+                        description = f'Added ₦{amount:,.2f} to Liquid Wallet'
+                        icon = 'wallet'
+                    elif txn_type == 'AIRTIME_PURCHASE':
+                        title = 'Airtime Purchase'
+                        phone = txn.get('metadata', {}).get('phoneNumber', 'Unknown')
+                        description = f'₦{amount:,.2f} airtime sent to {phone[-4:]}****' if phone != 'Unknown' else f'₦{amount:,.2f} airtime purchase'
+                        icon = 'phone'
+                    elif txn_type == 'DATA_PURCHASE':
+                        title = 'Data Purchase'
+                        phone = txn.get('metadata', {}).get('phoneNumber', 'Unknown')
+                        plan = txn.get('metadata', {}).get('planName', 'Data')
+                        description = f'{plan} for {phone[-4:]}****' if phone != 'Unknown' else f'₦{amount:,.2f} data purchase'
+                        icon = 'data'
+                    elif txn_type == 'KYC_VERIFICATION':
+                        title = 'KYC Verification'
+                        description = f'Account verification fee ₦{amount:,.2f}'
+                        icon = 'verification'
+                    else:
+                        title = f'VAS {txn_type.replace("_", " ").title()}'
+                        description = f'₦{amount:,.2f} VAS transaction'
+                        icon = 'vas'
+                    
+                    activity = {
+                        'id': str(txn['_id']),
+                        'type': 'VAS',
+                        'subtype': txn_type,
+                        'title': title,
+                        'description': description,
+                        'amount': amount,
+                        'reference': txn.get('reference', ''),
+                        'status': txn.get('status', 'UNKNOWN'),
+                        'provider': txn.get('provider', ''),
+                        'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                        'timestamp': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                        'icon': icon,
+                        'color': 'blue',
+                        'category': 'VAS Services'
+                    }
+                    activities.append(activity)
+            except Exception as e:
+                print(f"Error fetching VAS transactions: {e}")
+
+            # 2. Get recent expenses with smart filtering
             try:
                 now = datetime.utcnow()
                 one_minute_ago = now - timedelta(minutes=1)
@@ -43,14 +95,15 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 for expense in recent_expenses:
                     activity = {
                         'id': str(expense['_id']),
-                        'type': 'expense',
+                        'type': 'EXPENSE',
+                        'subtype': 'EXPENSE',
                         'title': expense.get('title', expense.get('description', 'Expense')),
                         'description': f"Spent ₦{expense.get('amount', 0):,.2f} on {expense.get('category', 'Unknown')}",
                         'amount': expense.get('amount', 0),
                         'category': expense.get('category', 'Unknown'),
-                        'date': expense.get('createdAt', datetime.utcnow()).isoformat() + 'Z',  # FIXED: Use createdAt for activity timestamp
-                        'timestamp': expense.get('createdAt', datetime.utcnow()).isoformat() + 'Z',  # ADDED: Explicit timestamp field
-                        'transactionDate': expense.get('date', datetime.utcnow()).isoformat() + 'Z',  # ADDED: Keep user-selected date for reference
+                        'date': expense.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                        'timestamp': expense.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                        'transactionDate': expense.get('date', datetime.utcnow()).isoformat() + 'Z',
                         'icon': 'expense',
                         'color': 'red'
                     }
@@ -58,10 +111,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             except Exception as e:
                 print(f"Error fetching expenses: {e}")
 
-            # HYBRID QUERY: Get recent incomes with smart filtering
-            # Shows entries where EITHER:
-            # 1. dateReceived is past/present (prevents future inflation)
-            # 2. OR createdAt is within last minute (shows just-created entries immediately)
+            # 3. Get recent incomes with smart filtering
             try:
                 now = datetime.utcnow()
                 one_minute_ago = now - timedelta(minutes=1)
@@ -77,14 +127,15 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 for income in recent_incomes:
                     activity = {
                         'id': str(income['_id']),
-                        'type': 'income',
+                        'type': 'INCOME',
+                        'subtype': 'INCOME',
                         'title': income.get('title', income.get('source', 'Income')),
                         'description': f"Received ₦{income.get('amount', 0):,.2f} from {income.get('source', 'Unknown')}",
                         'amount': income.get('amount', 0),
                         'source': income.get('source', 'Unknown'),
-                        'date': income.get('createdAt', datetime.utcnow()).isoformat() + 'Z',  # FIXED: Use createdAt for activity timestamp
-                        'timestamp': income.get('createdAt', datetime.utcnow()).isoformat() + 'Z',  # ADDED: Explicit timestamp field
-                        'transactionDate': income.get('dateReceived', datetime.utcnow()).isoformat() + 'Z',  # ADDED: Keep user-selected date for reference
+                        'date': income.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                        'timestamp': income.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                        'transactionDate': income.get('dateReceived', datetime.utcnow()).isoformat() + 'Z',
                         'icon': 'income',
                         'color': 'green'
                     }

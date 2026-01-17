@@ -764,7 +764,7 @@
                 return;
             }
             
-            document.getElementById('walletBalance').textContent = formatCurrency(wallet.balance || 0);
+            document.getElementById('walletBalance').textContent = formatCurrency(wallet.balance || 0, 'NGN');
             document.getElementById('walletAccountName').textContent = wallet.accountName || '-';
             document.getElementById('walletStatus').textContent = wallet.status || 'unknown';
             
@@ -824,7 +824,7 @@
                             html += '<tr style="border-bottom: 1px solid #eee;">';
                             html += `<td style="padding: 10px;">${formatDate(tx.createdAt)}</td>`;
                             html += `<td style="padding: 10px;">${tx.type || 'Unknown'}</td>`;
-                            html += `<td style="padding: 10px; text-align: right;">${formatCurrency(tx.amount || 0)}</td>`;
+                            html += `<td style="padding: 10px; text-align: right;">${formatCurrency(tx.amount || 0, 'NGN')}</td>`;
                             html += `<td style="padding: 10px;">${tx.status || 'Unknown'}</td>`;
                             html += '</tr>';
                         });
