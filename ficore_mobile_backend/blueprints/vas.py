@@ -2899,7 +2899,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
-        @vas_bp.route('/networks/data', methods=['GET'])
+    @vas_bp.route('/networks/data', methods=['GET'])
     @token_required
     def get_data_networks(current_user):
         """Get available data networks - Emergency fallback mode"""
@@ -2972,7 +2972,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'source': 'emergency'
             }), 200
     
-        @vas_bp.route('/data-plans/<network>', methods=['GET'])
+    @vas_bp.route('/data-plans/<network>', methods=['GET'])
     @token_required
     def get_data_plans(current_user, network):
         """Get data plans - Emergency fallback mode"""
