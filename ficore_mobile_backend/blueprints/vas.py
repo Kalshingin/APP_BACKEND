@@ -2895,46 +2895,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
-    @vas_bp.route('/networks/airtime', methods=['GET'])
-    @token_required
-    def get_airtime_networks(current_user):
-        """Get list of supported airtime networks"""
-        try:
-            response = requests.get(
-                f'{PEYFLEX_BASE_URL}/api/airtime/networks/',
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                return jsonify({
-                    'success': True,
-                    'data': response.json(),
-                    'message': 'Networks retrieved successfully'
-                }), 200
-            else:
-                return jsonify({
-                    'success': True,
-                    'data': [
-                        {'id': 'mtn', 'name': 'MTN'},
-                        {'id': 'airtel', 'name': 'Airtel'},
-                        {'id': 'glo', 'name': 'Glo'},
-                        {'id': '9mobile', 'name': '9mobile'}
-                    ],
-                    'message': 'Default networks list'
-                }), 200
-        except Exception as e:
-            print(f'⚠️ Error getting networks: {str(e)}')
-            return jsonify({
-                'success': True,
-                'data': [
-                    {'id': 'mtn', 'name': 'MTN'},
-                    {'id': 'airtel', 'name': 'Airtel'},
-                    {'id': 'glo', 'name': 'Glo'},
-                    {'id': '9mobile', 'name': '9mobile'}
-                ],
-                'message': 'Default networks list'
-            }), 200
-    
     @vas_bp.route('/networks/data', methods=['GET'])
     @token_required
     def get_data_networks(current_user):
