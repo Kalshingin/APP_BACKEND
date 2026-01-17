@@ -16,6 +16,7 @@ import hmac
 import hashlib
 import uuid
 import json
+import pymongo
 from utils.email_service import get_email_service
 from utils.dynamic_pricing_engine import get_pricing_engine, calculate_vas_price
 from utils.emergency_pricing_recovery import tag_emergency_transaction
@@ -1997,8 +1998,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         """Handle Monnify webhook with HMAC-SHA512 signature verification"""
         
         def process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, webhook_data):
-            """Process reserved account funding inline"""
+            """Process reserved account funding inline with idempotent logic"""
             try:
+                # CRITICAL: Check if this transaction was already processed (idempotency)
+                already_processed = mongo.db.vas_transactions.find_one({"reference": transaction_reference})
+                if already_processed:
+                    print(f"⚠️ Duplicate transaction ignored: {transaction_reference}")
+                    return jsonify({'success': True, 'message': 'Already processed'}), 200
+                
                 wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
                 if not wallet:
                     print(f'❌ Wallet not found for user: {user_id}')
@@ -2017,13 +2024,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     print(f'⚠️ Amount too small after fee: ₦{amount_paid} - ₦{deposit_fee} = ₦{amount_to_credit}')
                     return jsonify({'success': False, 'message': 'Amount too small to process'}), 400
                 
-                new_balance = wallet.get('balance', 0.0) + amount_to_credit
-                
-                mongo.db.vas_wallets.update_one(
-                    {'userId': ObjectId(user_id)},
-                    {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
-                )
-                
+                # SAFETY FIRST: Insert transaction record BEFORE updating wallet balance
                 transaction = {
                     '_id': ObjectId(),
                     'userId': ObjectId(user_id),
@@ -2038,7 +2039,20 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'createdAt': datetime.utcnow()
                 }
                 
-                mongo.db.vas_transactions.insert_one(transaction)
+                # Try to insert transaction - if duplicate key error, return success (already processed)
+                try:
+                    mongo.db.vas_transactions.insert_one(transaction)
+                except pymongo.errors.DuplicateKeyError:
+                    print(f"⚠️ Duplicate key error - transaction already exists: {transaction_reference}")
+                    return jsonify({'success': True, 'message': 'Already processed'}), 200
+                
+                # ONLY update wallet balance after successful transaction insert
+                new_balance = wallet.get('balance', 0.0) + amount_to_credit
+                
+                mongo.db.vas_wallets.update_one(
+                    {'userId': ObjectId(user_id)},
+                    {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+                )
                 
                 # Record corporate revenue (₦30 fee)
                 if deposit_fee > 0:
