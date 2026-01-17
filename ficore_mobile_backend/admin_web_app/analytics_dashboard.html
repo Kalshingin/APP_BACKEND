@@ -771,27 +771,41 @@
             }
         });
         
-        // API Helper
-        async function apiCall(endpoint) {
-            const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-                headers: {
-                    'Authorization': `Bearer ${ADMIN_TOKEN}`,
-                    'Content-Type': 'application/json'
+        // API Helper with timeout
+        async function apiCall(endpoint, timeout = 10000) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeout);
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                    headers: {
+                        'Authorization': `Bearer ${ADMIN_TOKEN}`,
+                        'Content-Type': 'application/json'
+                    },
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+                
+                if (response.status === 401 || response.status === 403) {
+                    alert('Session expired. Please login again.');
+                    localStorage.removeItem('admin_token');
+                    window.location.href = 'admin_login.html';
+                    return;
                 }
-            });
-            
-            if (response.status === 401 || response.status === 403) {
-                alert('Session expired. Please login again.');
-                localStorage.removeItem('admin_token');
-                window.location.href = 'admin_login.html';
-                return;
+                
+                if (!response.ok) {
+                    throw new Error(`API call failed: ${response.statusText}`);
+                }
+                
+                return await response.json();
+            } catch (error) {
+                clearTimeout(timeoutId);
+                if (error.name === 'AbortError') {
+                    throw new Error('Request timeout - please try again');
+                }
+                throw error;
             }
-            
-            if (!response.ok) {
-                throw new Error(`API call failed: ${response.statusText}`);
-            }
-            
-            return await response.json();
         }
         
         // Format event type for display
@@ -1398,12 +1412,13 @@
             try {
                 const hours = document.getElementById('rateLimitTimeframe').value;
                 
-                // Load overview
-                const overviewResponse = await apiCall(`/admin/rate-limits/overview?hours=${hours}`);
-                if (overviewResponse.success) {
-                    const overview = overviewResponse.data.overview;
-                    document.getElementById('rl-total-calls').textContent = overview.totalCalls.toLocaleString();
-                    document.getElementById('rl-calls-per-min').textContent = `${overview.callsPerMinute} calls/min`;
+                // Load overview with error handling
+                try {
+                    const overviewResponse = await apiCall(`/admin/rate-limits/overview?hours=${hours}`);
+                    if (overviewResponse.success) {
+                        const overview = overviewResponse.data.overview;
+                        document.getElementById('rl-total-calls').textContent = overview.totalCalls.toLocaleString();
+                        document.getElementById('rl-calls-per-min').textContent = `${overview.callsPerMinute} calls/min`;
                     document.getElementById('rl-limit-hits').textContent = overview.rateLimitHits.toLocaleString();
                     document.getElementById('rl-limit-rate').textContent = `${overview.rateLimitRate}% of calls`;
                     document.getElementById('rl-error-rate').textContent = `${overview.errorRate}%`;
@@ -1483,7 +1498,19 @@
                 
             } catch (error) {
                 console.error('Error loading rate limit data:', error);
-                alert('Error loading rate limit data: ' + error.message);
+                // Don't block the dashboard - just show empty state
+                document.getElementById('rl-total-calls').textContent = '0';
+                document.getElementById('rl-calls-per-min').textContent = '0 calls/min';
+                document.getElementById('rl-limit-hits').textContent = '0';
+                document.getElementById('rl-limit-rate').textContent = '0% of calls';
+                document.getElementById('rl-error-rate').textContent = '0%';
+                document.getElementById('rl-error-count').textContent = '0 errors';
+                document.getElementById('rl-avg-response').textContent = '0ms';
+                
+                // Show empty states for tables
+                document.getElementById('heavy-users-body').innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px; color: #6B7280;">Rate limit monitoring temporarily unavailable</td></tr>';
+                document.getElementById('endpoint-stats-body').innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: #6B7280;">Rate limit monitoring temporarily unavailable</td></tr>';
+                document.getElementById('violations-body').innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #6B7280;">Rate limit monitoring temporarily unavailable</td></tr>';
             }
         }
         
