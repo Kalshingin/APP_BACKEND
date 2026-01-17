@@ -766,7 +766,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
 
     
     @vas_bp.route('/networks/airtime', methods=['GET'])
-    def get_airtime_networks():
+    @token_required
+    def get_airtime_networks(current_user):
         """Get available airtime networks from Peyflex API"""
         try:
             print('🔍 Fetching airtime networks from Peyflex')
@@ -2895,7 +2896,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }), 500
     
     @vas_bp.route('/networks/airtime', methods=['GET'])
-    def get_airtime_networks():
+    @token_required
+    def get_airtime_networks(current_user):
         """Get list of supported airtime networks"""
         try:
             response = requests.get(
@@ -2933,8 +2935,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'message': 'Default networks list'
             }), 200
     
-        @vas_bp.route('/networks/data', methods=['GET'])
-    def get_data_networks():
+    @vas_bp.route('/networks/data', methods=['GET'])
+    @token_required
+    def get_data_networks(current_user):
         """Get available data networks from Peyflex API with correct response handling"""
         try:
             print('🔍 Fetching data networks from Peyflex')
@@ -3006,64 +3009,11 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'message': 'Fallback data networks (based on Peyflex API discovery)',
                 'emergency': True,
                 'error': str(e)
-            }), 200def get_data_networks():
-        """Get list of supported data networks"""
-        try:
-            response = requests.get(
-                f'{PEYFLEX_BASE_URL}/api/data/networks/',
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                peyflex_data = response.json()
-                print(f'✅ Peyflex data networks response: {peyflex_data}')
-                return jsonify({
-                    'success': True,
-                    'data': peyflex_data,
-                    'message': 'Data networks retrieved successfully'
-                }), 200
-            else:
-                print(f'⚠️ Peyflex data networks failed: {response.status_code}')
-                # Return default data networks based on Peyflex documentation
-                return jsonify({
-                    'success': True,
-                    'data': [
-                        {'id': 'mtn_sme_data', 'name': 'MTN SME Data'},
-                        {'id': 'mtn_gifting_data', 'name': 'MTN Gifting Data'},
-                        {'id': 'airtel_data', 'name': 'Airtel Data'},
-                        {'id': 'glo_data', 'name': 'Glo Data'},
-                        {'id': '9mobile_data', 'name': '9mobile Data'},
-                    ],
-                    'message': 'Default data networks list'
-                }), 200
-        except Exception as e:
-            print(f'⚠️ Error getting data networks: {str(e)}')
-            return jsonify({
-                'success': True,
-                'data': [
-                    {'id': 'mtn_sme_data', 'name': 'MTN SME Data'},
-                    {'id': 'mtn_gifting_data', 'name': 'MTN Gifting Data'},
-                    {'id': 'airtel_data', 'name': 'Airtel Data'},
-                    {'id': 'glo_data', 'name': 'Glo Data'},
-                    {'id': '9mobile_data', 'name': '9mobile Data'},
-                ],
-                'message': 'Default data networks list'
-            }), 200
-        except Exception as e:
-            print(f'⚠️ Error getting networks: {str(e)}')
-            return jsonify({
-                'success': True,
-                'data': [
-                    {'id': 'mtn', 'name': 'MTN'},
-                    {'id': 'airtel', 'name': 'Airtel'},
-                    {'id': 'glo', 'name': 'Glo'},
-                    {'id': '9mobile', 'name': '9mobile'}
-                ],
-                'message': 'Default networks list'
             }), 200
     
-        @vas_bp.route('/data-plans/<network>', methods=['GET'])
-    def get_data_plans(network):
+    @vas_bp.route('/data-plans/<network>', methods=['GET'])
+    @token_required
+    def get_data_plans(current_user, network):
         """Get data plans for a specific network with correct Peyflex API handling"""
         try:
             print(f'🔍 Fetching data plans for network: {network}')
@@ -3157,7 +3107,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'message': f'Emergency data plans for {network.upper()} (Peyflex unavailable)',
                 'emergency': True,
                 'error': str(e)
-            }), 200def get_data_plans(network):
+            }), 200
+    
+    def get_data_plans(network):
         """Get data plans for a specific network with comprehensive logging"""
         try:
             # 🔍 ENHANCED LOGGING: Environment check
