@@ -74,7 +74,7 @@ class DynamicPricingEngine:
             cache_key = f"peyflex_rates_{service_type}_{network or 'all'}"
             
             # Check cache first (only for non-expired cache)
-            cached_rates = self.mongo.pricing_cache.find_one({
+            cached_rates = self.mongo.db.pricing_cache.find_one({
                 'cache_key': cache_key,
                 'expires_at': {'$gt': datetime.utcnow()}
             })
@@ -92,7 +92,7 @@ class DynamicPricingEngine:
                 raise ValueError(f"Unsupported service type: {service_type}")
             
             # Cache the rates
-            self.mongo.pricing_cache.replace_one(
+            self.mongo.db.pricing_cache.replace_one(
                 {'cache_key': cache_key},
                 {
                     'cache_key': cache_key,
@@ -132,36 +132,103 @@ class DynamicPricingEngine:
         return base_rates
 
     def _fetch_data_rates(self, network: str = None) -> Dict:
-        """Fetch data plan rates from Peyflex"""
+        """
+        Fetch data plan rates from Peyflex with connection retry strategies
+        """
         try:
             if network:
                 url = f'{self.peyflex_base_url}/api/data/plans/?network={network.lower()}'
             else:
                 url = f'{self.peyflex_base_url}/api/data/networks/'
             
-            response = requests.get(
-                url,
-                headers={'Authorization': f'Token {self.peyflex_token}'},
-                timeout=10
-            )
+            # Try multiple connection strategies to work around connection resets
+            strategies = [
+                {
+                    'name': 'Standard Request',
+                    'headers': {
+                        'Authorization': f'Token {self.peyflex_token}',
+                        'User-Agent': 'FiCore-Backend/1.0 (Nigeria; Python-Requests)',
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    'timeout': 10
+                },
+                {
+                    'name': 'Browser-like Request',
+                    'headers': {
+                        'Authorization': f'Token {self.peyflex_token}',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'application/json, text/plain, */*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Referer': 'https://client.peyflex.com.ng/',
+                        'Connection': 'keep-alive',
+                        'Sec-Fetch-Dest': 'empty',
+                        'Sec-Fetch-Mode': 'cors',
+                        'Sec-Fetch-Site': 'same-origin'
+                    },
+                    'timeout': 15
+                },
+                {
+                    'name': 'Simple Request (No Auth)',
+                    'headers': {
+                        'User-Agent': 'FiCore-Backend/1.0',
+                        'Accept': 'application/json'
+                    },
+                    'timeout': 10
+                }
+            ]
             
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Transform Peyflex response to our format
-                if isinstance(data, list):
-                    rates = {}
-                    for plan in data:
-                        plan_id = plan.get('plan_code', plan.get('id', ''))
-                        rates[plan_id] = {
-                            'name': plan.get('name', plan.get('plan_name', '')),
-                            'price': float(plan.get('price', plan.get('amount', 0))),
-                            'validity': plan.get('validity', 30),
-                            'network': network.upper() if network else 'UNKNOWN'
-                        }
-                    return rates
-                
-            raise Exception(f"Invalid response from Peyflex: {response.status_code}")
+            last_error = None
+            
+            for strategy in strategies:
+                try:
+                    logger.info(f"Trying {strategy['name']} for Peyflex API")
+                    
+                    response = requests.get(
+                        url,
+                        headers=strategy['headers'],
+                        timeout=strategy['timeout'],
+                        verify=True,  # Ensure SSL verification
+                        allow_redirects=True
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        # Transform Peyflex response to our format
+                        if isinstance(data, list):
+                            rates = {}
+                            for plan in data:
+                                plan_id = plan.get('plan_code', plan.get('id', ''))
+                                rates[plan_id] = {
+                                    'name': plan.get('name', plan.get('plan_name', '')),
+                                    'price': float(plan.get('price', plan.get('amount', 0))),
+                                    'validity': plan.get('validity', 30),
+                                    'network': network.upper() if network else 'UNKNOWN'
+                                }
+                            logger.info(f"✅ {strategy['name']} succeeded - got {len(rates)} plans")
+                            return rates
+                    else:
+                        logger.warning(f"❌ {strategy['name']} failed: HTTP {response.status_code}")
+                        last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                        
+                except requests.exceptions.ConnectionError as e:
+                    logger.warning(f"❌ {strategy['name']} connection error: {str(e)}")
+                    last_error = f"Connection error: {str(e)}"
+                    continue
+                except requests.exceptions.SSLError as e:
+                    logger.warning(f"❌ {strategy['name']} SSL error: {str(e)}")
+                    last_error = f"SSL error: {str(e)}"
+                    continue
+                except Exception as e:
+                    logger.warning(f"❌ {strategy['name']} failed: {str(e)}")
+                    last_error = str(e)
+                    continue
+            
+            # All strategies failed
+            logger.error(f"All connection strategies failed. Last error: {last_error}")
+            raise Exception(f"All Peyflex connection strategies failed: {last_error}")
             
         except Exception as e:
             logger.error(f"Error fetching data rates: {str(e)}")
@@ -175,7 +242,7 @@ class DynamicPricingEngine:
         try:
             # Try to get last known good price from cache (even if expired)
             cache_key = f"peyflex_rates_{service_type}_{network or 'all'}"
-            last_known_rates = self.mongo.pricing_cache.find_one(
+            last_known_rates = self.mongo.db.pricing_cache.find_one(
                 {'cache_key': cache_key},
                 sort=[('created_at', -1)]  # Get most recent
             )
