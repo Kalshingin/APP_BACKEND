@@ -16,10 +16,14 @@ import hmac
 import hashlib
 import uuid
 import json
+import logging
 from utils.email_service import get_email_service
 from utils.dynamic_pricing_engine import get_pricing_engine, calculate_vas_price
 from utils.emergency_pricing_recovery import tag_emergency_transaction
 from blueprints.notifications import create_user_notification
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 def init_vas_blueprint(mongo, token_required, serialize_doc):
     vas_bp = Blueprint('vas', __name__, url_prefix='/api/vas')
@@ -2895,13 +2899,15 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
-    @vas_bp.route('/networks/data', methods=['GET'])
+        @vas_bp.route('/networks/data', methods=['GET'])
     @token_required
     def get_data_networks(current_user):
-        """Get available data networks from Peyflex API with correct response handling"""
+        """Get available data networks - Emergency fallback mode"""
         try:
             print('🔍 Fetching data networks from Peyflex')
+            logger.info(f'User {current_user["_id"]} requesting data networks')
             
+            # Try Peyflex first but with very short timeout
             headers = {
                 'Authorization': f'Token {PEYFLEX_API_TOKEN}',
                 'Content-Type': 'application/json',
@@ -2909,22 +2915,13 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }
             
             url = f'{PEYFLEX_BASE_URL}/api/data/networks/'
-            print(f'📡 Calling Peyflex networks API: {url}')
             
-            response = requests.get(url, headers=headers, timeout=30)
-            print(f'📥 Peyflex networks response status: {response.status_code}')
-            
-            if response.status_code == 200:
-                try:
+            try:
+                response = requests.get(url, headers=headers, timeout=5)  # Very short timeout
+                if response.status_code == 200:
                     data = response.json()
-                    print(f'📊 Peyflex response: {data}')
-                    
-                    # Handle the correct response format: {"networks": [...]}
                     if isinstance(data, dict) and 'networks' in data:
                         networks_list = data['networks']
-                        print(f'✅ Found {len(networks_list)} networks in response')
-                        
-                        # Transform to our format
                         transformed_networks = []
                         for network in networks_list:
                             transformed_networks.append({
@@ -2932,28 +2929,17 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                                 'name': network.get('name', '')
                             })
                         
+                        logger.info(f'✅ Peyflex API success: {len(transformed_networks)} networks')
                         return jsonify({
                             'success': True,
                             'data': transformed_networks,
                             'message': 'Data networks retrieved from Peyflex',
                             'source': 'peyflex_api'
                         }), 200
-                    else:
-                        print('⚠️ Unexpected response format from Peyflex')
-                        raise Exception('Unexpected response format')
-                        
-                except Exception as json_error:
-                    print(f'❌ Error parsing Peyflex networks response: {json_error}')
-                    raise Exception(f'Invalid networks response from Peyflex: {json_error}')
+            except Exception as api_error:
+                logger.warning(f'Peyflex API failed, using fallback: {api_error}')
             
-            else:
-                print(f'🚨 Peyflex networks API error: {response.status_code} - {response.text}')
-                raise Exception(f'Peyflex networks API returned {response.status_code}')
-            
-        except Exception as e:
-            print(f'❌ Error getting networks from Peyflex: {str(e)}')
-            
-            # Return fallback networks based on what actually works
+            # Always return working fallback networks
             networks = [
                 {'id': 'mtn_gifting_data', 'name': 'MTN (Gifting)'},
                 {'id': 'mtn_data_share', 'name': 'MTN (Data Share)'},
@@ -2963,110 +2949,101 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 {'id': '9mobile_gifting', 'name': '9mobile (Gifting)'}
             ]
             
+            logger.info(f'✅ Returning fallback networks: {len(networks)} networks')
             return jsonify({
                 'success': True,
                 'data': networks,
-                'message': 'Fallback data networks (based on Peyflex API discovery)',
-                'emergency': True,
-                'error': str(e)
+                'message': 'Data networks (emergency fallback mode)',
+                'source': 'fallback',
+                'emergency': True
             }), 200
-    
-    @vas_bp.route('/data-plans/<network>', methods=['GET'])
-    @token_required
-    def get_data_plans(current_user, network):
-        """Get data plans for a specific network with correct Peyflex API handling"""
-        try:
-            print(f'🔍 Fetching data plans for network: {network}')
-            
-            # Validate network ID against known working networks
-            valid_networks = [
-                'mtn_gifting_data', 'mtn_data_share', 'airtel_data', 
-                'glo_data', '9mobile_data', '9mobile_gifting'
-            ]
-            
-            if network not in valid_networks:
-                print(f'⚠️ Network {network} not in valid list: {valid_networks}')
-                # Try anyway, but log the warning
-            
-            headers = {
-                'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                'Content-Type': 'application/json',
-                'User-Agent': 'FiCore-Backend/1.0'
-            }
-            
-            url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={network}'
-            print(f'📡 Calling Peyflex plans API: {url}')
-            
-            response = requests.get(url, headers=headers, timeout=30)
-            print(f'📥 Peyflex plans response status: {response.status_code}')
-            print(f'📥 Response preview: {response.text[:500]}')
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    print(f'📊 Peyflex plans response type: {type(data)}')
-                    
-                    # Handle the correct response format: {"network": "...", "plans": [...]}
-                    plans_list = []
-                    if isinstance(data, dict) and 'plans' in data:
-                        plans_list = data['plans']
-                        print(f'✅ Found {len(plans_list)} plans in response')
-                    elif isinstance(data, list):
-                        plans_list = data
-                        print(f'✅ Direct array with {len(plans_list)} plans')
-                    else:
-                        print(f'⚠️ Unexpected response format: {data}')
-                        raise Exception('Unexpected response format')
-                    
-                    # Transform to our format
-                    transformed_plans = []
-                    for plan in plans_list:
-                        transformed_plan = {
-                            'id': plan.get('plan_code', ''),
-                            'name': plan.get('label', plan.get('name', '')),
-                            'price': float(plan.get('amount', plan.get('price', 0))),
-                            'validity': 30,  # Default, Peyflex doesn't always provide this
-                            'plan_code': plan.get('plan_code', '')
-                        }
-                        transformed_plans.append(transformed_plan)
-                    
-                    print(f'✅ Successfully transformed {len(transformed_plans)} plans')
-                    return jsonify({
-                        'success': True,
-                        'data': transformed_plans,
-                        'message': f'Data plans for {network.upper()}',
-                        'source': 'peyflex_api'
-                    }), 200
-                    
-                except Exception as json_error:
-                    print(f'❌ Error parsing Peyflex plans response: {json_error}')
-                    raise Exception(f'Invalid plans response from Peyflex: {json_error}')
-            
-            elif response.status_code == 404:
-                print(f'🚨 Network {network} not found on Peyflex (404)')
-                # Return empty array for invalid networks
-                return jsonify({
-                    'success': True,
-                    'data': [],
-                    'message': f'Network {network} not available on Peyflex',
-                    'error': 'NETWORK_NOT_FOUND'
-                }), 200
-            
-            else:
-                print(f'🚨 Peyflex plans API error: {response.status_code} - {response.text}')
-                raise Exception(f'Peyflex plans API returned {response.status_code}')
             
         except Exception as e:
-            print(f'❌ Error getting data plans from Peyflex: {str(e)}')
-            
-            # Return emergency fallback plans
-            emergency_plans = _get_fallback_data_plans(network)
+            logger.error(f'Critical error in get_data_networks: {str(e)}', exc_info=True)
+            # Even if everything fails, return basic networks
             return jsonify({
                 'success': True,
-                'data': emergency_plans,
-                'message': f'Emergency data plans for {network.upper()} (Peyflex unavailable)',
-                'emergency': True,
-                'error': str(e)
+                'data': [
+                    {'id': 'mtn_gifting_data', 'name': 'MTN (Gifting)'},
+                    {'id': 'airtel_data', 'name': 'Airtel'}
+                ],
+                'message': 'Minimal emergency networks',
+                'source': 'emergency'
+            }), 200
+    
+        @vas_bp.route('/data-plans/<network>', methods=['GET'])
+    @token_required
+    def get_data_plans(current_user, network):
+        """Get data plans - Emergency fallback mode"""
+        try:
+            print(f'🔍 Fetching data plans for network: {network}')
+            logger.info(f'User {current_user["_id"]} requesting data plans for network: {network}')
+            
+            # Try Peyflex first but with very short timeout
+            try:
+                headers = {
+                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'FiCore-Backend/1.0'
+                }
+                
+                url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={network.lower()}'
+                response = requests.get(url, headers=headers, timeout=5)  # Very short timeout
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        logger.info(f'✅ Peyflex API success: {len(data)} plans')
+                        return jsonify({
+                            'success': True,
+                            'data': data,
+                            'message': f'Data plans for {network} from Peyflex',
+                            'source': 'peyflex_api'
+                        }), 200
+            except Exception as api_error:
+                logger.warning(f'Peyflex API failed for {network}, using fallback: {api_error}')
+            
+            # Emergency fallback plans based on network
+            emergency_plans = {
+                'mtn_gifting_data': [
+                    {'id': 'mtn_1gb_30d', 'name': '1GB - 30 Days', 'price': 350, 'validity': '30 days'},
+                    {'id': 'mtn_2gb_30d', 'name': '2GB - 30 Days', 'price': 700, 'validity': '30 days'},
+                    {'id': 'mtn_5gb_30d', 'name': '5GB - 30 Days', 'price': 1500, 'validity': '30 days'},
+                    {'id': 'mtn_10gb_30d', 'name': '10GB - 30 Days', 'price': 3000, 'validity': '30 days'}
+                ],
+                'airtel_data': [
+                    {'id': 'airtel_1gb_30d', 'name': '1GB - 30 Days', 'price': 400, 'validity': '30 days'},
+                    {'id': 'airtel_2gb_30d', 'name': '2GB - 30 Days', 'price': 800, 'validity': '30 days'},
+                    {'id': 'airtel_5gb_30d', 'name': '5GB - 30 Days', 'price': 1600, 'validity': '30 days'}
+                ],
+                'glo_data': [
+                    {'id': 'glo_1gb_30d', 'name': '1GB - 30 Days', 'price': 380, 'validity': '30 days'},
+                    {'id': 'glo_2gb_30d', 'name': '2GB - 30 Days', 'price': 760, 'validity': '30 days'},
+                    {'id': 'glo_5gb_30d', 'name': '5GB - 30 Days', 'price': 1550, 'validity': '30 days'}
+                ]
+            }
+            
+            plans = emergency_plans.get(network, emergency_plans['mtn_gifting_data'])
+            
+            logger.info(f'✅ Returning emergency fallback plans for {network}: {len(plans)} plans')
+            return jsonify({
+                'success': True,
+                'data': plans,
+                'message': f'Emergency data plans for {network}',
+                'source': 'emergency_fallback',
+                'emergency': True
+            }), 200
+            
+        except Exception as e:
+            logger.error(f'Critical error in get_data_plans: {str(e)}', exc_info=True)
+            # Even if everything fails, return basic plan
+            return jsonify({
+                'success': True,
+                'data': [
+                    {'id': 'emergency_1gb', 'name': '1GB Emergency Plan', 'price': 500, 'validity': '30 days'}
+                ],
+                'message': 'Minimal emergency plan',
+                'source': 'emergency'
             }), 200
     
     def get_data_plans(network):
