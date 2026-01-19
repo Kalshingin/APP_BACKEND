@@ -1194,8 +1194,10 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             bvn = data.get('bvn', '').strip()
             nin = data.get('nin', '').strip()
             dob = data.get('dateOfBirth', '').strip()  # Format from frontend: DD/MM/YYYY
+            full_name = data.get('fullName', '').strip()  # Full name as on BVN
+            phone_number = data.get('phoneNumber', '').strip()  # Phone number for verification
             
-            print(f"🔍 BVN Verification Request - BVN: {bvn}, NIN: {nin}, DOB: {dob}")
+            print(f"🔍 BVN Verification Request - BVN: {bvn}, NIN: {nin}, DOB: {dob}, Name: {full_name}, Phone: {phone_number}")
             
             # Validate
             if len(bvn) != 11 or not bvn.isdigit():
@@ -1216,6 +1218,25 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Date of birth is required.'
                 }), 400
             
+            if not full_name:
+                return jsonify({
+                    'success': False,
+                    'message': 'Full name is required.'
+                }), 400
+            
+            if not phone_number:
+                return jsonify({
+                    'success': False,
+                    'message': 'Phone number is required.'
+                }), 400
+            
+            # Validate phone number format
+            if len(phone_number) < 10 or len(phone_number) > 14:
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid phone number format.'
+                }), 400
+            
             # Convert date format from DD/MM/YYYY to DD-MMM-YYYY for Monnify
             try:
                 from datetime import datetime
@@ -1228,24 +1249,24 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Invalid date format. Please use DD/MM/YYYY.'
                 }), 400
             
-            # Get user details and validate they're not empty
-            user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
-            user_phone = current_user.get('phoneNumber', '').strip()
+            # Use provided name and phone from form (not from user profile)
+            user_name = full_name.strip()
+            user_phone = phone_number.strip()
             user_email = current_user.get('email', '').strip()
             
-            print(f"🔍 User details - Name: '{user_name}', Phone: '{user_phone}', Email: '{user_email}'")
+            print(f"🔍 Verification details - Name: '{user_name}', Phone: '{user_phone}', Email: '{user_email}'")
             
-            if not user_name:
-                return jsonify({
-                    'success': False,
-                    'message': 'User name is required. Please update your profile.'
-                }), 400
+            # Basic validation (names should match reasonably with user profile)
+            profile_first = current_user.get('firstName', '').upper()
+            profile_last = current_user.get('lastName', '').upper()
+            provided_name_upper = user_name.upper()
             
-            if not user_phone:
-                return jsonify({
-                    'success': False,
-                    'message': 'Phone number is required. Please update your profile.'
-                }), 400
+            # Check if provided name contains user's profile names (flexible matching)
+            if profile_first and profile_first not in provided_name_upper:
+                print(f"⚠️ Warning: Provided name '{user_name}' doesn't contain profile first name '{profile_first}'")
+            
+            if profile_last and profile_last not in provided_name_upper:
+                print(f"⚠️ Warning: Provided name '{user_name}' doesn't contain profile last name '{profile_last}'")
             
             # Check eligibility first
             user_id = str(current_user['_id'])
@@ -1298,14 +1319,13 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             nin_last_name = nin_response.get('lastName', '').upper()
             nin_full_name = f"{nin_first_name} {nin_last_name}".strip()
             
-            # Cross-check: NIN name should match user's name
-            user_first = current_user.get('firstName', '').upper()
-            user_last = current_user.get('lastName', '').upper()
+            # Cross-check: NIN name should match provided name (not just profile)
+            user_first_words = user_name.upper().split()
             
-            if nin_first_name not in user_first and nin_last_name not in user_last:
+            if nin_first_name not in user_first_words and nin_last_name not in user_first_words:
                 return jsonify({
                     'success': False,
-                    'message': 'NIN verification failed. Name does not match your profile.'
+                    'message': 'NIN verification failed. Name does not match the provided name.'
                 }), 400
             
             # Create dedicated account immediately (no payment required)
@@ -1337,6 +1357,30 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 raise Exception(f'Reserved account creation failed: {van_response.text}')
             
             van_data = van_response.json()['responseBody']
+            
+            # Update user profile with verified information
+            profile_update = {
+                'phone': user_phone,  # Save phone number to profile
+                'dateOfBirth': dob,   # Save DOB in DD/MM/YYYY format
+                'bvn': bvn,          # Save BVN (for future reference)
+                'nin': nin,          # Save NIN (for future reference)
+                'kycStatus': 'verified',  # Mark KYC as completed
+                'kycVerifiedAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow()
+            }
+            
+            # Only update full name if it's more complete than current profile
+            current_display_name = current_user.get('displayName', '').strip()
+            if len(user_name) > len(current_display_name):
+                profile_update['displayName'] = user_name
+            
+            # Update user profile
+            mongo.db.users.update_one(
+                {'_id': ObjectId(user_id)},
+                {'$set': profile_update}
+            )
+            
+            print(f"✅ Updated user profile with KYC data: phone={user_phone}, DOB={dob}, KYC=verified")
             
             # Create wallet record with KYC verification
             wallet_data = {
