@@ -1347,23 +1347,27 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             print(f'SUCCESS: FREE BVN & NIN verification completed for user {user_id}: {user_name}')
             print(f'EXPENSE: Business expense recorded: N70 verification costs')
             
-            # Return the first account details
-            first_account = van_data['accounts'][0] if van_data['accounts'] else {}
-            
+            # Return all accounts for frontend to choose from
             return jsonify({
                 'success': True,
                 'data': {
-                    'accountNumber': first_account.get('accountNumber', ''),
-                    'accountName': first_account.get('accountName', ''),
-                    'bankName': first_account.get('bankName', 'Wema Bank'),
-                    'bankCode': first_account.get('bankCode', '035'),
+                    'accounts': van_data['accounts'],  # All available bank accounts
+                    'accountReference': van_data['accountReference'],
+                    'contractCode': van_data['contractCode'],
                     'tier': 'TIER_2',
                     'kycVerified': True,
                     'verifiedName': user_name,
                     'ninName': nin_full_name,
-                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z'
+                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z',
+                    # Keep backward compatibility - return first account as default
+                    'defaultAccount': {
+                        'accountNumber': van_data['accounts'][0].get('accountNumber', '') if van_data['accounts'] else '',
+                        'accountName': van_data['accounts'][0].get('accountName', '') if van_data['accounts'] else '',
+                        'bankName': van_data['accounts'][0].get('bankName', 'Wema Bank') if van_data['accounts'] else 'Wema Bank',
+                        'bankCode': van_data['accounts'][0].get('bankCode', '035') if van_data['accounts'] else '035',
+                    }
                 },
-                'message': 'BVN and NIN verified successfully. Account created!'
+                'message': f'BVN and NIN verified successfully. Account created with {len(van_data["accounts"])} available banks!'
             }), 201
             
         except Exception as e:
@@ -3180,19 +3184,25 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             print(f'✅ Basic reserved account created for user {user_id}')
             
-            # Return the first account details
-            first_account = van_data['accounts'][0] if van_data['accounts'] else {}
-            
+            # Return all accounts for frontend to choose from
             return jsonify({
                 'success': True,
                 'data': {
-                    'accountNumber': first_account.get('accountNumber', ''),
-                    'accountName': first_account.get('accountName', ''),
-                    'bankName': first_account.get('bankName', 'Wema Bank'),
-                    'bankCode': first_account.get('bankCode', '035'),
-                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z'
+                    'accounts': van_data['accounts'],  # All available bank accounts
+                    'accountReference': van_data['accountReference'],
+                    'contractCode': van_data['contractCode'],
+                    'tier': 'TIER_1',
+                    'kycVerified': False,
+                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z',
+                    # Keep backward compatibility - return first account as default
+                    'defaultAccount': {
+                        'accountNumber': van_data['accounts'][0].get('accountNumber', '') if van_data['accounts'] else '',
+                        'accountName': van_data['accounts'][0].get('accountName', '') if van_data['accounts'] else '',
+                        'bankName': van_data['accounts'][0].get('bankName', 'Wema Bank') if van_data['accounts'] else 'Wema Bank',
+                        'bankCode': van_data['accounts'][0].get('bankCode', '035') if van_data['accounts'] else '035',
+                    }
                 },
-                'message': 'Reserved account created successfully'
+                'message': f'Reserved account created successfully with {len(van_data["accounts"])} available banks'
             }), 201
             
         except Exception as e:
@@ -3206,7 +3216,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     @vas_bp.route('/reserved-account', methods=['GET'])
     @token_required
     def get_reserved_account(current_user):
-        """Get user's reserved account details"""
+        """Get user's reserved account details with all available banks"""
         try:
             user_id = str(current_user['_id'])
             wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
@@ -3217,22 +3227,34 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Reserved account not found. Please create a wallet first.'
                 }), 404
             
-            # Get the first account details (most wallets have one account)
+            # Get all available accounts
             accounts = wallet.get('accounts', [])
-            first_account = accounts[0] if accounts else {}
             
+            if not accounts:
+                return jsonify({
+                    'success': False,
+                    'message': 'No accounts found in wallet'
+                }), 404
+            
+            # Return all accounts for frontend to choose from
             return jsonify({
                 'success': True,
                 'data': {
-                    'accountNumber': first_account.get('accountNumber', ''),
-                    'accountName': first_account.get('accountName', ''),
-                    'bankName': first_account.get('bankName', 'Wema Bank'),
-                    'bankCode': first_account.get('bankCode', '035'),
+                    'accounts': accounts,  # All available bank accounts
                     'accountReference': wallet.get('accountReference', ''),
                     'status': wallet.get('status', 'active'),
-                    'createdAt': wallet.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
+                    'tier': wallet.get('tier', 'TIER_1'),
+                    'kycVerified': wallet.get('kycVerified', False),
+                    'createdAt': wallet.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                    # Keep backward compatibility - return first account as default
+                    'defaultAccount': {
+                        'accountNumber': accounts[0].get('accountNumber', ''),
+                        'accountName': accounts[0].get('accountName', ''),
+                        'bankName': accounts[0].get('bankName', 'Wema Bank'),
+                        'bankCode': accounts[0].get('bankCode', '035'),
+                    }
                 },
-                'message': 'Reserved account retrieved successfully'
+                'message': f'Reserved account retrieved successfully with {len(accounts)} available banks'
             }), 200
             
         except Exception as e:
@@ -3240,6 +3262,75 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             return jsonify({
                 'success': False,
                 'message': 'Failed to retrieve reserved account',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_bp.route('/reserved-account/set-preferred-bank', methods=['POST'])
+    @token_required
+    def set_preferred_bank(current_user):
+        """Set user's preferred bank for their reserved account"""
+        try:
+            user_id = str(current_user['_id'])
+            data = request.get_json()
+            
+            if not data or 'bankCode' not in data:
+                return jsonify({
+                    'success': False,
+                    'message': 'Bank code is required'
+                }), 400
+            
+            bank_code = data['bankCode']
+            
+            # Get user's wallet
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet not found'
+                }), 404
+            
+            # Find the selected bank account
+            accounts = wallet.get('accounts', [])
+            selected_account = None
+            
+            for account in accounts:
+                if account.get('bankCode') == bank_code:
+                    selected_account = account
+                    break
+            
+            if not selected_account:
+                return jsonify({
+                    'success': False,
+                    'message': 'Bank not found in your available accounts'
+                }), 404
+            
+            # Update user's preferred bank
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'preferredBankCode': bank_code,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            print(f'✅ User {user_id} set preferred bank to {selected_account.get("bankName")} ({bank_code})')
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'preferredAccount': selected_account,
+                    'message': f'Preferred bank set to {selected_account.get("bankName")}'
+                },
+                'message': 'Preferred bank updated successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error setting preferred bank: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to set preferred bank',
                 'errors': {'general': [str(e)]}
             }), 500
     
