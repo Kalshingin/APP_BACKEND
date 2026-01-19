@@ -1069,13 +1069,12 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             account_data = {
                 'accountReference': f'FICORE_{user_id}',
-                'accountName': f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip(),
+                'accountName': f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()[:50],  # Monnify 50-char limit
                 'currencyCode': 'NGN',
                 'contractCode': MONNIFY_CONTRACT_CODE,
                 'customerEmail': current_user.get('email', ''),
-                'customerName': f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip(),
-                'getAllAvailableBanks': False,
-                'preferredBanks': ['035']
+                'customerName': f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()[:50],  # Monnify 50-char limit
+                'getAllAvailableBanks': True
             }
             
             van_response = requests.post(
@@ -1282,15 +1281,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             account_data = {
                 'accountReference': f'FICORE_{user_id}',
-                'accountName': user_name,
+                'accountName': user_name[:50],  # Monnify 50-char limit
                 'currencyCode': 'NGN',
                 'contractCode': MONNIFY_CONTRACT_CODE,
                 'customerEmail': current_user.get('email', ''),
-                'customerName': user_name,
+                'customerName': user_name[:50],  # Monnify 50-char limit
                 'bvn': bvn,
                 'nin': nin,
-                'getAllAvailableBanks': False,
-                'preferredBanks': ['035']  # Wema Bank
+                'getAllAvailableBanks': True  # Moniepoint default, user choice
             }
             
             van_response = requests.post(
@@ -1476,15 +1474,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             account_data = {
                 'accountReference': f'FICORE_{user_id}',
-                'accountName': verification['verifiedName'],
+                'accountName': verification['verifiedName'][:50],  # Monnify 50-char limit
                 'currencyCode': 'NGN',
                 'contractCode': MONNIFY_CONTRACT_CODE,
                 'customerEmail': current_user.get('email', ''),
-                'customerName': verification['verifiedName'],
+                'customerName': verification['verifiedName'][:50],  # Monnify 50-char limit
                 'bvn': verification['bvn'],
                 'nin': verification['nin'],  # Include NIN for full Tier 2 compliance
-                'getAllAvailableBanks': False,
-                'preferredBanks': ['035']  # Wema Bank
+                'getAllAvailableBanks': True  # Moniepoint default, user choice
             }
             
             van_response = requests.post(
@@ -3142,13 +3139,12 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             # Create basic reserved account (Tier 1 - no BVN/NIN required)
             account_data = {
                 'accountReference': f'FICORE_{user_id}',
-                'accountName': current_user.get('fullName', f"FiCore User {user_id[:8]}"),
+                'accountName': current_user.get('fullName', f"FiCore User {user_id[:8]}")[:50],  # Monnify 50-char limit
                 'currencyCode': 'NGN',
                 'contractCode': MONNIFY_CONTRACT_CODE,
                 'customerEmail': current_user.get('email', ''),
-                'customerName': current_user.get('fullName', f"FiCore User {user_id[:8]}"),
-                'getAllAvailableBanks': False,
-                'preferredBanks': ['035']  # Wema Bank
+                'customerName': current_user.get('fullName', f"FiCore User {user_id[:8]}")[:50],  # Monnify 50-char limit
+                'getAllAvailableBanks': True  # Moniepoint default, user choice
             }
             
             van_response = requests.post(
