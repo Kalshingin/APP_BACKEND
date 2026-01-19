@@ -1793,6 +1793,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'amountPaid': amount_paid,
                     'depositFee': deposit_fee,
                     'reference': transaction_reference,
+                    'transactionReference': transaction_reference,  # CRITICAL: Add this field for unique index
                     'status': 'SUCCESS',
                     'provider': 'monnify',
                     'metadata': webhook_data,
@@ -1864,6 +1865,87 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 
             except Exception as e:
                 print(f'❌ Error processing wallet funding: {str(e)}')
+                return jsonify({'success': False, 'message': 'Processing failed'}), 500
+        
+        def process_reserved_account_funding_update_only(user_id, amount_paid, transaction_reference, webhook_data):
+            """Update wallet balance for existing transaction (no insert)"""
+            try:
+                wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                if not wallet:
+                    print(f'❌ Wallet not found for user: {user_id}')
+                    return jsonify({'success': False, 'message': 'Wallet not found'}), 404
+                
+                # Check if user is premium (no deposit fee)
+                user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+                is_premium = user.get('subscriptionStatus') == 'active' if user else False
+                
+                # Apply deposit fee (₦30 for non-premium users)
+                deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
+                amount_to_credit = amount_paid - deposit_fee
+                
+                # Ensure we don't credit negative amounts
+                if amount_to_credit <= 0:
+                    print(f'⚠️ Amount too small after fee: ₦{amount_paid} - ₦{deposit_fee} = ₦{amount_to_credit}')
+                    return jsonify({'success': False, 'message': 'Amount too small to process'}), 400
+                
+                # Update wallet balance
+                new_balance = wallet.get('balance', 0.0) + amount_to_credit
+                
+                mongo.db.vas_wallets.update_one(
+                    {'userId': ObjectId(user_id)},
+                    {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+                )
+                
+                # Record corporate revenue (₦30 fee)
+                if deposit_fee > 0:
+                    corporate_revenue = {
+                        '_id': ObjectId(),
+                        'type': 'SERVICE_FEE',
+                        'category': 'DEPOSIT_FEE',
+                        'amount': deposit_fee,
+                        'userId': ObjectId(user_id),
+                        'relatedTransaction': transaction_reference,
+                        'description': f'Deposit fee from user {user_id}',
+                        'status': 'RECORDED',
+                        'createdAt': datetime.utcnow(),
+                        'metadata': {
+                            'amountPaid': amount_paid,
+                            'amountCredited': amount_to_credit,
+                            'isPremium': is_premium
+                        }
+                    }
+                    mongo.db.corporate_revenue.insert_one(corporate_revenue)
+                    print(f'💰 Corporate revenue recorded: ₦{deposit_fee} from user {user_id}')
+                
+                # Send notification
+                try:
+                    notification_id = create_user_notification(
+                        mongo=mongo,
+                        user_id=user_id,
+                        category='wallet',
+                        title='💰 Wallet Funded Successfully',
+                        body=f'₦{amount_to_credit:,.2f} added to your Liquid Wallet. New balance: ₦{new_balance:,.2f}',
+                        related_id=transaction_reference,
+                        metadata={
+                            'transaction_type': 'WALLET_FUNDING',
+                            'amount_credited': amount_to_credit,
+                            'deposit_fee': deposit_fee,
+                            'new_balance': new_balance,
+                            'is_premium': is_premium
+                        },
+                        priority='normal'
+                    )
+                    
+                    if notification_id:
+                        print(f'🔔 Wallet funding notification created: {notification_id}')
+                except Exception as e:
+                    print(f'⚠️ Failed to create notification: {str(e)}')
+                
+                print(f'✅ Wallet Funding (Update): User {user_id}, Paid: ₦{amount_paid}, Fee: ₦{deposit_fee}, Credited: ₦{amount_to_credit}, New Balance: ₦{new_balance}')
+                return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
+                
+            except Exception as e:
+                print(f'❌ Error updating wallet funding: {str(e)}')
                 return jsonify({'success': False, 'message': 'Processing failed'}), 500
         
         try:
@@ -2017,16 +2099,33 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     # We have a user → treat as wallet funding (reserved account style)
                     print(f"Processing as direct reserved account funding for user {user_id}")
                     
-                    # Idempotency check
+                    # Comprehensive idempotency check - any status
                     existing = mongo.db.vas_transactions.find_one({
-                        'reference': transaction_reference,
-                        'type': 'WALLET_FUNDING',
-                        'status': 'SUCCESS'
+                        'reference': transaction_reference
                     })
                     
                     if existing:
-                        print(f"Duplicate SUCCESS webhook ignored: {transaction_reference}")
-                        return jsonify({'success': True, 'message': 'Already processed'}), 200
+                        if existing.get('status') == 'SUCCESS':
+                            print(f"Duplicate SUCCESS webhook ignored: {transaction_reference}")
+                            return jsonify({'success': True, 'message': 'Already processed'}), 200
+                        else:
+                            print(f"Found existing transaction with status {existing.get('status')}: {transaction_reference}")
+                            print("Updating existing transaction to SUCCESS and crediting wallet...")
+                            
+                            # Update existing transaction to SUCCESS
+                            mongo.db.vas_transactions.update_one(
+                                {'_id': existing['_id']},
+                                {'$set': {
+                                    'status': 'SUCCESS',
+                                    'amountPaid': amount_paid,
+                                    'provider': 'monnify',
+                                    'metadata': data,
+                                    'completedAt': datetime.utcnow()
+                                }}
+                            )
+                            
+                            # Now credit the wallet (call the inline function but skip the insert part)
+                            return process_reserved_account_funding_update_only(user_id, amount_paid, transaction_reference, data)
                     
                     return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
                 
