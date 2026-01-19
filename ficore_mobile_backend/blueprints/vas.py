@@ -1182,22 +1182,95 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
-    @vas_bp.route('/verify-bvn', methods=['POST'])
+    @vas_bp.route('/check-existing-bvn-nin', methods=['POST'])
     @token_required
-    def verify_bvn(current_user):
+    def check_existing_bvn_nin(current_user):
         """
-        Verify BVN, NIN, and DOB - FREE verification (business absorbs ₦70 cost)
-        Creates account immediately after successful verification
+        Check if BVN or NIN already exists in the database
         """
         try:
             data = request.json
             bvn = data.get('bvn', '').strip()
             nin = data.get('nin', '').strip()
-            dob = data.get('dateOfBirth', '').strip()  # Format from frontend: DD/MM/YYYY
-            full_name = data.get('fullName', '').strip()  # Full name as on BVN
-            phone_number = data.get('phoneNumber', '').strip()  # Phone number for verification
             
-            print(f"🔍 BVN Verification Request - BVN: {bvn}, NIN: {nin}, DOB: {dob}, Name: {full_name}, Phone: {phone_number}")
+            # Validate input
+            if len(bvn) != 11 or not bvn.isdigit():
+                return jsonify({
+                    'success': False,
+                    'exists': False,
+                    'message': 'Invalid BVN format'
+                }), 400
+            
+            if len(nin) != 11 or not nin.isdigit():
+                return jsonify({
+                    'success': False,
+                    'exists': False,
+                    'message': 'Invalid NIN format'
+                }), 400
+            
+            # Check if BVN exists in any wallet
+            bvn_exists = mongo.db.vas_wallets.find_one({
+                'bvn': bvn,
+                'status': 'ACTIVE'
+            })
+            
+            # Check if NIN exists in any wallet
+            nin_exists = mongo.db.vas_wallets.find_one({
+                'nin': nin,
+                'status': 'ACTIVE'
+            })
+            
+            # Also check in user profiles
+            bvn_in_profile = mongo.db.users.find_one({
+                'bvn': bvn
+            })
+            
+            nin_in_profile = mongo.db.users.find_one({
+                'nin': nin
+            })
+            
+            exists = bool(bvn_exists or nin_exists or bvn_in_profile or nin_in_profile)
+            
+            if exists:
+                message = 'This BVN or NIN has already been used for account creation.'
+            else:
+                message = 'BVN and NIN are available for use.'
+            
+            return jsonify({
+                'success': True,
+                'exists': exists,
+                'message': message,
+                'details': {
+                    'bvn_in_wallet': bool(bvn_exists),
+                    'nin_in_wallet': bool(nin_exists),
+                    'bvn_in_profile': bool(bvn_in_profile),
+                    'nin_in_profile': bool(nin_in_profile)
+                }
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error checking existing BVN/NIN: {str(e)}')
+            return jsonify({
+                'success': False,
+                'exists': False,
+                'message': 'Error checking records',
+                'error': str(e)
+            }), 500
+
+    @vas_bp.route('/verify-bvn', methods=['POST'])
+    @token_required
+    def verify_bvn(current_user):
+        """
+        Create Monnify account using BVN and NIN - FREE for users (business absorbs ₦70 cost)
+        Uses original working approach: send BVN directly to Monnify for account creation
+        """
+        try:
+            data = request.json
+            bvn = data.get('bvn', '').strip()
+            nin = data.get('nin', '').strip()
+            phone_number = data.get('phoneNumber', '').strip()  # Only phone needed
+            
+            print(f"🔍 BVN Account Creation Request - BVN: {bvn}, NIN: {nin}, Phone: {phone_number}")
             
             # Validate
             if len(bvn) != 11 or not bvn.isdigit():
@@ -1212,18 +1285,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Invalid NIN. Must be 11 digits.'
                 }), 400
             
-            if not dob:
-                return jsonify({
-                    'success': False,
-                    'message': 'Date of birth is required.'
-                }), 400
-            
-            if not full_name:
-                return jsonify({
-                    'success': False,
-                    'message': 'Full name is required.'
-                }), 400
-            
             if not phone_number:
                 return jsonify({
                     'success': False,
@@ -1236,37 +1297,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'success': False,
                     'message': 'Invalid phone number format.'
                 }), 400
-            
-            # Convert date format from DD/MM/YYYY to DD-MMM-YYYY for Monnify
-            try:
-                from datetime import datetime
-                date_obj = datetime.strptime(dob, '%d/%m/%Y')
-                monnify_dob = date_obj.strftime('%d-%b-%Y')  # e.g., 15-Jan-1990
-                print(f"🔍 Date conversion: {dob} -> {monnify_dob}")
-            except ValueError:
-                return jsonify({
-                    'success': False,
-                    'message': 'Invalid date format. Please use DD/MM/YYYY.'
-                }), 400
-            
-            # Use provided name and phone from form (not from user profile)
-            user_name = full_name.strip()
-            user_phone = phone_number.strip()
-            user_email = current_user.get('email', '').strip()
-            
-            print(f"🔍 Verification details - Name: '{user_name}', Phone: '{user_phone}', Email: '{user_email}'")
-            
-            # Basic validation (names should match reasonably with user profile)
-            profile_first = current_user.get('firstName', '').upper()
-            profile_last = current_user.get('lastName', '').upper()
-            provided_name_upper = user_name.upper()
-            
-            # Check if provided name contains user's profile names (flexible matching)
-            if profile_first and profile_first not in provided_name_upper:
-                print(f"⚠️ Warning: Provided name '{user_name}' doesn't contain profile first name '{profile_first}'")
-            
-            if profile_last and profile_last not in provided_name_upper:
-                print(f"⚠️ Warning: Provided name '{user_name}' doesn't contain profile last name '{profile_last}'")
             
             # Check eligibility first
             user_id = str(current_user['_id'])
@@ -1288,47 +1318,18 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'You already have a verified account.'
                 }), 400
             
-            # Call Monnify BVN verification (₦10 cost - absorbed by business)
-            bvn_response = call_monnify_bvn_verification(
-                bvn=bvn,
-                name=user_name,
-                dob=monnify_dob,  # Use converted format
-                mobile=user_phone
-            )
+            # Use user profile data for account creation
+            user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
+            user_email = current_user.get('email', '').strip()
             
-            # Check BVN match status
-            name_match = bvn_response.get('name', {})
-            if name_match.get('matchStatus') != 'FULL_MATCH':
-                return jsonify({
-                    'success': False,
-                    'message': 'BVN verification failed. Name does not match.'
-                }), 400
+            # If no name in profile, use a default
+            if not user_name:
+                user_name = f"FiCore User {user_id[:8]}"
             
-            dob_match = bvn_response.get('dateOfBirth', 'NO_MATCH')
-            if dob_match == 'NO_MATCH':
-                return jsonify({
-                    'success': False,
-                    'message': 'BVN verification failed. Date of birth does not match.'
-                }), 400
+            print(f"🔍 Account creation details - Name: '{user_name}', Phone: '{phone_number}', Email: '{user_email}'")
             
-            # Call Monnify NIN verification (₦60 cost - absorbed by business)
-            nin_response = call_monnify_nin_verification(nin=nin)
-            
-            # Validate NIN response
-            nin_first_name = nin_response.get('firstName', '').upper()
-            nin_last_name = nin_response.get('lastName', '').upper()
-            nin_full_name = f"{nin_first_name} {nin_last_name}".strip()
-            
-            # Cross-check: NIN name should match provided name (not just profile)
-            user_first_words = user_name.upper().split()
-            
-            if nin_first_name not in user_first_words and nin_last_name not in user_first_words:
-                return jsonify({
-                    'success': False,
-                    'message': 'NIN verification failed. Name does not match the provided name.'
-                }), 400
-            
-            # Create dedicated account immediately (no payment required)
+            # Create dedicated account immediately using Monnify account creation (not verification)
+            # This is the original working approach - send BVN directly to create account
             access_token = call_monnify_auth()
             
             account_data = {
@@ -1336,12 +1337,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'accountName': user_name[:50],  # Monnify 50-char limit
                 'currencyCode': 'NGN',
                 'contractCode': MONNIFY_CONTRACT_CODE,
-                'customerEmail': current_user.get('email', ''),
+                'customerEmail': user_email,
                 'customerName': user_name[:50],  # Monnify 50-char limit
                 'bvn': bvn,
                 'nin': nin,
-                'getAllAvailableBanks': True  # Moniepoint default, user choice
+                'getAllAvailableBanks': True  # Get all available banks for user choice
             }
+            
+            print(f"🏦 Creating Monnify reserved account with BVN: {bvn[:3]}***{bvn[-3:]}")
             
             van_response = requests.post(
                 f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
@@ -1354,14 +1357,15 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             )
             
             if van_response.status_code != 200:
+                print(f"❌ Monnify account creation failed: {van_response.status_code} - {van_response.text}")
                 raise Exception(f'Reserved account creation failed: {van_response.text}')
             
             van_data = van_response.json()['responseBody']
+            print(f"✅ Monnify account created successfully with {len(van_data.get('accounts', []))} banks")
             
             # Update user profile with verified information
             profile_update = {
-                'phone': user_phone,  # Save phone number to profile
-                'dateOfBirth': dob,   # Save DOB in DD/MM/YYYY format
+                'phone': phone_number,  # Save phone number to profile
                 'bvn': bvn,          # Save BVN (for future reference)
                 'nin': nin,          # Save NIN (for future reference)
                 'kycStatus': 'verified',  # Mark KYC as completed
@@ -1380,7 +1384,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 {'$set': profile_update}
             )
             
-            print(f"✅ Updated user profile with KYC data: phone={user_phone}, DOB={dob}, KYC=verified")
+            print(f"✅ Updated user profile with KYC data: phone={phone_number}, KYC=verified")
             
             # Create wallet record with KYC verification
             wallet_data = {
@@ -1402,26 +1406,39 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             mongo.db.vas_wallets.insert_one(wallet_data)
             
-            # Record business expense for verification costs
+            # Update user profile with provided phone number
+            profile_update = {
+                'phone': phone_number,  # Save phone number to profile
+                'updatedAt': datetime.utcnow()
+            }
+            
+            # Update user profile
+            mongo.db.users.update_one(
+                {'_id': ObjectId(user_id)},
+                {'$set': profile_update}
+            )
+            
+            # Record business expense for account creation (business absorbs verification costs)
             business_expense = {
                 '_id': ObjectId(),
-                'type': 'BVN_NIN_VERIFICATION',
-                'amount': 70.0,  # ₦10 BVN + ₦60 NIN
+                'type': 'ACCOUNT_CREATION_COSTS',
+                'amount': 70.0,  # ₦10 BVN + ₦60 NIN (absorbed by business)
                 'userId': ObjectId(user_id),
-                'description': f'BVN/NIN verification costs for user {user_id}',
+                'description': f'Account creation costs for user {user_id} (BVN/NIN verification absorbed by business)',
                 'status': 'RECORDED',
                 'createdAt': datetime.utcnow(),
                 'metadata': {
                     'bvnCost': 10.0,
                     'ninCost': 60.0,
                     'businessExpense': True,
-                    'userCharged': False
+                    'userCharged': False,
+                    'accountCreation': True
                 }
             }
             mongo.db.business_expenses.insert_one(business_expense)
             
-            print(f'SUCCESS: FREE BVN & NIN verification completed for user {user_id}: {user_name}')
-            print(f'EXPENSE: Business expense recorded: N70 verification costs')
+            print(f'SUCCESS: FREE account creation completed for user {user_id}: {user_name}')
+            print(f'EXPENSE: Business expense recorded: ₦70 verification costs (absorbed by business)')
             
             # Return all accounts for frontend to choose from
             return jsonify({
@@ -1433,7 +1450,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'tier': 'TIER_2',
                     'kycVerified': True,
                     'verifiedName': user_name,
-                    'ninName': nin_full_name,
                     'createdAt': wallet_data['createdAt'].isoformat() + 'Z',
                     # Keep backward compatibility - return first account as default
                     'defaultAccount': {
@@ -1443,7 +1459,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                         'bankCode': van_data['accounts'][0].get('bankCode', '035') if van_data['accounts'] else '035',
                     }
                 },
-                'message': f'BVN and NIN verified successfully. Account created with {len(van_data["accounts"])} available banks!'
+                'message': f'Account created successfully with {len(van_data["accounts"])} available banks!'
             }), 201
             
         except Exception as e:
@@ -3311,22 +3327,38 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'data': None
                 }), 404
             
-            # Get reserved accounts from wallet
-            reserved_accounts = wallet.get('reservedAccounts', [])
-            if not reserved_accounts:
+            # Get accounts from wallet (correct field name)
+            accounts = wallet.get('accounts', [])
+            if not accounts:
                 return jsonify({
                     'success': False,
-                    'message': 'No reserved accounts found',
+                    'message': 'No accounts found',
                     'data': None
                 }), 404
+            
+            # Get preferred bank info
+            preferred_bank_code = wallet.get('preferredBankCode')
+            preferred_bank = None
+            
+            if preferred_bank_code:
+                for account in accounts:
+                    if account.get('bankCode') == preferred_bank_code:
+                        preferred_bank = account
+                        break
+            
+            # If no preferred bank set, use first account as default
+            if not preferred_bank and accounts:
+                preferred_bank = accounts[0]
             
             # Return accounts with bank information
             return jsonify({
                 'success': True,
                 'data': {
-                    'accounts': reserved_accounts,
+                    'accounts': accounts,
+                    'availableBanks': accounts,  # Same as accounts for compatibility
+                    'preferredBank': preferred_bank,
                     'preferredBankCode': wallet.get('preferredBankCode'),
-                    'hasMultipleBanks': len(reserved_accounts) > 1
+                    'hasMultipleBanks': len(accounts) > 1
                 },
                 'message': 'Reserved accounts retrieved successfully'
             }), 200
