@@ -1187,8 +1187,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     @token_required
     def verify_bvn(current_user):
         """
-        Verify BVN, NIN, and DOB - return name for user confirmation
-        This is where you pay ₦70 to Monnify (₦10 BVN + ₦60 NIN)
+        Verify BVN, NIN, and DOB - FREE verification (business absorbs ₦70 cost)
+        Creates account immediately after successful verification
         """
         try:
             data = request.json
@@ -1215,7 +1215,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Date of birth is required.'
                 }), 400
             
-            # Check eligibility first (prevent ₦70 waste)
+            # Check eligibility first
             user_id = str(current_user['_id'])
             eligible, _ = check_eligibility(user_id)
             if not eligible:
@@ -1235,7 +1235,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'You already have a verified account.'
                 }), 400
             
-            # Call Monnify BVN verification (₦10 cost)
+            # Call Monnify BVN verification (₦10 cost - absorbed by business)
             user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
             bvn_response = call_monnify_bvn_verification(
                 bvn=bvn,
@@ -1259,7 +1259,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'BVN verification failed. Date of birth does not match.'
                 }), 400
             
-            # Call Monnify NIN verification (₦60 cost)
+            # Call Monnify NIN verification (₦60 cost - absorbed by business)
             nin_response = call_monnify_nin_verification(nin=nin)
             
             # Validate NIN response
@@ -1277,37 +1277,96 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'NIN verification failed. Name does not match your profile.'
                 }), 400
             
-            # Store verification result temporarily (don't create account yet)
-            # Delete any existing pending verifications
-            mongo.db.kyc_verifications.delete_many({
-                'userId': ObjectId(user_id),
-                'status': 'pending_confirmation'
-            })
+            # Create dedicated account immediately (no payment required)
+            access_token = call_monnify_auth()
             
-            # Create new verification record with BOTH BVN and NIN
-            mongo.db.kyc_verifications.insert_one({
-                '_id': ObjectId(),
-                'userId': ObjectId(user_id),
+            account_data = {
+                'accountReference': f'FICORE_{user_id}',
+                'accountName': user_name,
+                'currencyCode': 'NGN',
+                'contractCode': MONNIFY_CONTRACT_CODE,
+                'customerEmail': current_user.get('email', ''),
+                'customerName': user_name,
                 'bvn': bvn,
                 'nin': nin,
-                'verifiedName': user_name,
-                'ninName': nin_full_name,
-                'status': 'pending_confirmation',
-                'createdAt': datetime.utcnow(),
-                'expiresAt': datetime.utcnow() + timedelta(minutes=10)
-            })
+                'getAllAvailableBanks': False,
+                'preferredBanks': ['035']  # Wema Bank
+            }
             
-            print(f'✅ BVN & NIN verified for user {user_id}: {user_name}')
+            van_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json=account_data,
+                timeout=30
+            )
+            
+            if van_response.status_code != 200:
+                raise Exception(f'Reserved account creation failed: {van_response.text}')
+            
+            van_data = van_response.json()['responseBody']
+            
+            # Create wallet record with KYC verification
+            wallet_data = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'balance': 0.0,
+                'accountReference': van_data['accountReference'],
+                'contractCode': van_data['contractCode'],
+                'accounts': van_data['accounts'],
+                'status': 'ACTIVE',
+                'tier': 'TIER_2',  # Full KYC verified account
+                'kycVerified': True,
+                'kycStatus': 'verified',
+                'bvn': bvn,
+                'nin': nin,
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow()
+            }
+            
+            mongo.db.vas_wallets.insert_one(wallet_data)
+            
+            # Record business expense for verification costs
+            business_expense = {
+                '_id': ObjectId(),
+                'type': 'BVN_NIN_VERIFICATION',
+                'amount': 70.0,  # ₦10 BVN + ₦60 NIN
+                'userId': ObjectId(user_id),
+                'description': f'BVN/NIN verification costs for user {user_id}',
+                'status': 'RECORDED',
+                'createdAt': datetime.utcnow(),
+                'metadata': {
+                    'bvnCost': 10.0,
+                    'ninCost': 60.0,
+                    'businessExpense': True,
+                    'userCharged': False
+                }
+            }
+            mongo.db.business_expenses.insert_one(business_expense)
+            
+            print(f'✅ FREE BVN & NIN verification completed for user {user_id}: {user_name}')
+            print(f'💰 Business expense recorded: ₦70 verification costs')
+            
+            # Return the first account details
+            first_account = van_data['accounts'][0] if van_data['accounts'] else {}
             
             return jsonify({
                 'success': True,
                 'data': {
+                    'accountNumber': first_account.get('accountNumber', ''),
+                    'accountName': first_account.get('accountName', ''),
+                    'bankName': first_account.get('bankName', 'Wema Bank'),
+                    'bankCode': first_account.get('bankCode', '035'),
+                    'tier': 'TIER_2',
+                    'kycVerified': True,
                     'verifiedName': user_name,
                     'ninName': nin_full_name,
-                    'matchStatus': 'FULL_MATCH'
+                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z'
                 },
-                'message': 'BVN and NIN verified successfully'
-            }), 200
+                'message': 'BVN and NIN verified successfully. Account created!'
+            }), 201
             
         except Exception as e:
             print(f'❌ Error verifying BVN/NIN: {str(e)}')
@@ -1377,268 +1436,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
 
-    @vas_bp.route('/verification/generate-payment', methods=['POST'])
-    @token_required
-    def generate_verification_payment(current_user):
-        """Generate one-time payment for KYC verification fee (₦70)"""
-        try:
-            user_id = str(current_user['_id'])
-            data = request.get_json()
-            
-            bvn = data.get('bvn', '').strip()
-            nin = data.get('nin', '').strip()
-            
-            if not bvn or not nin:
-                return jsonify({
-                    'success': False,
-                    'message': 'BVN and NIN are required'
-                }), 400
-            
-            # Store BVN/NIN temporarily for account creation after payment
-            mongo.db.kyc_verifications.delete_many({
-                'userId': ObjectId(user_id),
-                'status': 'pending_payment'
-            })
-            
-            mongo.db.kyc_verifications.insert_one({
-                '_id': ObjectId(),
-                'userId': ObjectId(user_id),
-                'bvn': bvn,
-                'nin': nin,
-                'status': 'pending_payment',
-                'createdAt': datetime.utcnow(),
-                'expiresAt': datetime.utcnow() + timedelta(minutes=30)
-            })
-            
-            # Generate one-time payment for ₦70 verification fee
-            # Initialize transaction with Monnify first
-            access_token = call_monnify_auth()
-            
-            transaction_reference = f'VER_{user_id}_{int(datetime.utcnow().timestamp())}'
-            
-            # Initialize transaction
-            init_data = {
-                'amount': 70.00,
-                'customerName': current_user.get('fullName', f'FiCore User {user_id[:8]}'),
-                'customerEmail': current_user.get('email', ''),
-                'paymentReference': transaction_reference,
-                'paymentDescription': 'KYC Verification Fee',
-                'currencyCode': 'NGN',
-                'contractCode': MONNIFY_CONTRACT_CODE,
-                'redirectUrl': 'https://ficore.africa/payment-success',
-                'paymentMethods': ['ACCOUNT_TRANSFER']
-            }
-            
-            init_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v1/merchant/transactions/init-transaction',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=init_data,
-                timeout=30
-            )
-            
-            if init_response.status_code != 200:
-                raise Exception(f'Transaction initialization failed: {init_response.text}')
-            
-            init_result = init_response.json()['responseBody']
-            monnify_transaction_reference = init_result['transactionReference']
-            
-            # Generate dynamic account for payment
-            payment_data = {
-                'transactionReference': monnify_transaction_reference,
-                'amount': 70.00,
-                'customerName': current_user.get('fullName', f'FiCore User {user_id[:8]}'),
-                'customerEmail': current_user.get('email', ''),
-                'bankCode': '035',  # Wema Bank
-                'accountDurationInMinutes': 30
-            }
-            
-            payment_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v1/merchant/bank-transfer/init-payment',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=payment_data,
-                timeout=30
-            )
-            
-            if payment_response.status_code != 200:
-                raise Exception(f'Payment initialization failed: {payment_response.text}')
-            
-            payment_result = payment_response.json()['responseBody']
-            
-            # Store payment details for webhook matching
-            mongo.db.vas_transactions.insert_one({
-                '_id': ObjectId(),
-                'userId': ObjectId(user_id),
-                'type': 'KYC_VERIFICATION',
-                'amount': 70.00,
-                'status': 'PENDING',
-                'paymentReference': transaction_reference,
-                'monnifyTransactionReference': monnify_transaction_reference,
-                'accountNumber': payment_result['accountNumber'],
-                'accountName': payment_result['accountName'],
-                'bankName': payment_result['bankName'],
-                'bankCode': payment_result['bankCode'],
-                'expiresAt': datetime.utcnow() + timedelta(minutes=30),
-                'createdAt': datetime.utcnow()
-            })
-            
-            print(f'✅ KYC verification payment generated for user {user_id}: {payment_result["accountNumber"]}')
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'accountNumber': payment_result['accountNumber'],
-                    'accountName': payment_result['accountName'],
-                    'bankName': payment_result['bankName'],
-                    'bankCode': payment_result['bankCode'],
-                    'amount': 70.00,
-                    'reference': transaction_reference,
-                    'expiresAt': (datetime.utcnow() + timedelta(minutes=30)).isoformat() + 'Z'
-                },
-                'message': 'Verification payment account generated',
-                'disclaimer': {
-                    'nonRefundable': True,
-                    'governmentFee': True,
-                    'warning': 'NON-REFUNDABLE: The ₦70 verification fee is a government charge for BVN/NIN validation, not a FiCore fee. If verification fails due to incorrect details, you must pay again with correct information.',
-                    'notice': 'This is a government regulatory fee, not a FiCore charge'
-                }
-            }), 200
-            
-        except Exception as e:
-            print(f'❌ Error generating verification payment: {str(e)}')
-            return jsonify({
-                'success': False,
-                'message': 'Failed to generate payment account',
-                'errors': {'general': [str(e)]},
-                'reminder': 'Remember: Verification fees are non-refundable government charges. Please ensure your BVN and NIN are correct before proceeding.'
-            }), 500
-
-    @vas_bp.route('/verification/verify-and-create', methods=['POST'])
-    @token_required
-    def verify_payment_and_create_account(current_user):
-        """Verify KYC payment was received and create dedicated account"""
-        try:
-            user_id = str(current_user['_id'])
-            
-            # Check for successful KYC verification payment
-            successful_payment = mongo.db.vas_transactions.find_one({
-                'userId': ObjectId(user_id),
-                'type': 'KYC_VERIFICATION',
-                'status': 'SUCCESS'
-            })
-            
-            if not successful_payment:
-                return jsonify({
-                    'success': False,
-                    'message': 'Payment not found yet. Please wait a moment and try again.',
-                    'reminder': 'If your BVN/NIN details were incorrect, the ₦70 government verification fee is non-refundable. You will need to pay again with correct details.'
-                }), 400
-            
-            # Get stored KYC data
-            kyc_data = mongo.db.kyc_verifications.find_one({
-                'userId': ObjectId(user_id),
-                'status': 'pending_payment'
-            })
-            
-            if not kyc_data:
-                return jsonify({
-                    'success': False,
-                    'message': 'KYC data not found. Please restart the verification process.',
-                    'note': 'Previous verification fees are non-refundable as they are government charges for BVN/NIN validation.'
-                }), 400
-            
-            # Check if wallet already exists
-            existing_wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
-            if existing_wallet:
-                return jsonify({
-                    'success': False,
-                    'message': 'Dedicated account already exists.'
-                }), 400
-            
-            # Create dedicated account with KYC data
-            access_token = call_monnify_auth()
-            
-            account_data = {
-                'accountReference': f'FICORE_{user_id}',
-                'accountName': current_user.get('fullName', f"FiCore User {user_id[:8]}"),
-                'currencyCode': 'NGN',
-                'contractCode': MONNIFY_CONTRACT_CODE,
-                'customerEmail': current_user.get('email', ''),
-                'customerName': current_user.get('fullName', f"FiCore User {user_id[:8]}"),
-                'bvn': kyc_data['bvn'],
-                'nin': kyc_data['nin'],
-                'getAllAvailableBanks': False,
-                'preferredBanks': ['035']  # Wema Bank
-            }
-            
-            van_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=account_data,
-                timeout=30
-            )
-            
-            if van_response.status_code != 200:
-                raise Exception(f'Reserved account creation failed: {van_response.text}')
-            
-            van_data = van_response.json()['responseBody']
-            
-            # Create wallet record with KYC verification
-            wallet_data = {
-                '_id': ObjectId(),
-                'userId': ObjectId(user_id),
-                'balance': 0.0,
-                'accountReference': van_data['accountReference'],
-                'contractCode': van_data['contractCode'],
-                'accounts': van_data['accounts'],
-                'status': 'ACTIVE',
-                'tier': 'TIER_2',  # Full KYC verified account
-                'kycVerified': True,
-                'bvn': kyc_data['bvn'],
-                'nin': kyc_data['nin'],
-                'createdAt': datetime.utcnow(),
-                'updatedAt': datetime.utcnow()
-            }
-            
-            mongo.db.vas_wallets.insert_one(wallet_data)
-            
-            # Update KYC verification status
-            mongo.db.kyc_verifications.update_one(
-                {'_id': kyc_data['_id']},
-                {'$set': {'status': 'completed', 'completedAt': datetime.utcnow()}}
-            )
-            
-            print(f'✅ KYC verified dedicated account created for user {user_id}')
-            
-            # Return the first account details
-            first_account = van_data['accounts'][0] if van_data['accounts'] else {}
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'accountNumber': first_account.get('accountNumber', ''),
-                    'accountName': first_account.get('accountName', ''),
-                    'bankName': first_account.get('bankName', 'Wema Bank'),
-                    'bankCode': first_account.get('bankCode', '035'),
-                    'tier': 'TIER_2',
-                    'kycVerified': True,
-                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z'
-                },
-                'message': 'Payment verified and dedicated account created successfully'
-            }), 201
-            
-        except Exception as e:
-            print(f'❌ Error verifying payment and creating account: {str(e)}')
-            return jsonify({
-                'success': False,
+    # REMOVED: Payment-related endpoints no longer needed
+    # BVN/NIN verification is now FREE - business absorbs costs
+    # Account creation happens immediately after verification
                 'message': 'Failed to verify payment and create account',
                 'errors': {'general': [str(e)]}
             }), 500
