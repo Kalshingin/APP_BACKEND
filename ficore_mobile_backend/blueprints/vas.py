@@ -859,7 +859,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         User must meet ONE of these criteria:
         1. Used app for 3+ consecutive days
         2. Recorded 10+ transactions (income/expense)
-        3. Completed 5+ Quick Pay VAS transactions
         """
         user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
         
@@ -875,15 +874,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         if total_txns >= 10:
             return True, "10+ transactions"
         
-        # Check 3: Quick Pay usage
-        quick_pay_count = mongo.db.vas_transactions.count_documents({
-            'userId': ObjectId(user_id),
-            'type': {'$in': ['AIRTIME', 'DATA']},
-            'status': 'SUCCESS'
-        })
-        if quick_pay_count >= 5:
-            return True, "5+ Quick Pay"
-        
         return False, None
     
     def get_eligibility_progress(user_id):
@@ -895,17 +885,11 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         login_streak = rewards_record.get('streak', 0) if rewards_record else 0
         total_txns = mongo.db.income.count_documents({'userId': ObjectId(user_id)})
         total_txns += mongo.db.expenses.count_documents({'userId': ObjectId(user_id)})
-        quick_pay_count = mongo.db.vas_transactions.count_documents({
-            'userId': ObjectId(user_id),
-            'type': {'$in': ['AIRTIME', 'DATA']},
-            'status': 'SUCCESS'
-        })
         
         # Return flat structure that matches frontend expectations
         return {
             'loginDays': login_streak,  # Frontend expects 'loginDays', not 'loginStreak'
-            'totalTransactions': total_txns,
-            'quickPayCount': quick_pay_count
+            'totalTransactions': total_txns
         }
     
     def call_monnify_auth():
@@ -990,110 +974,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             return data['responseBody']
         except Exception as e:
             print(f'❌ NIN verification error: {str(e)}')
-            raise
-    
-    def call_monnify_init_payment(transaction_reference, amount, customer_name, customer_email, payment_description='FiCore Liquid Cash Payment'):
-        """
-        Call Monnify's One-Time Payment API for Quick Pay
-        
-        Step 1: Initialize transaction to get Monnify transaction reference
-        Step 2: Use that reference to generate dynamic account number
-        """
-        try:
-            access_token = call_monnify_auth()
-            
-            # Step 1: Initialize transaction with Monnify
-            init_payload = {
-                'amount': amount,
-                'customerName': customer_name,
-                'customerEmail': customer_email,
-                'paymentReference': transaction_reference,  # Our unique reference
-                'paymentDescription': payment_description,
-                'currencyCode': 'NGN',
-                'contractCode': MONNIFY_CONTRACT_CODE,
-                'paymentMethods': ['ACCOUNT_TRANSFER']
-            }
-            
-            print(f'🔄 Step 1: Initializing Monnify transaction with payload: {init_payload}')
-            
-            init_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v1/merchant/transactions/init-transaction',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=init_payload,
-                timeout=30
-            )
-            
-            print(f'📥 Monnify init response status: {init_response.status_code}')
-            print(f'📥 Monnify init response body: {init_response.text}')
-            
-            if init_response.status_code != 200:
-                error_msg = f'Monnify transaction initialization failed with status {init_response.status_code}: {init_response.text}'
-                print(f'❌ {error_msg}')
-                raise Exception(error_msg)
-            
-            init_json = init_response.json()
-            
-            if not init_json.get('requestSuccessful', False):
-                error_msg = f"Monnify init failed: {init_json.get('responseMessage', 'Unknown error')}"
-                print(f'❌ {error_msg}')
-                raise Exception(error_msg)
-            
-            # Get the Monnify transaction reference
-            monnify_transaction_ref = init_json['responseBody']['transactionReference']
-            print(f'✅ Step 1 complete. Monnify transaction reference: {monnify_transaction_ref}')
-            
-            # Step 2: Generate dynamic account using Monnify transaction reference
-            account_payload = {
-                'transactionReference': monnify_transaction_ref,
-                'bankCode': '058'  # GTBank for USSD generation (optional)
-            }
-            
-            print(f'🔄 Step 2: Generating dynamic account with payload: {account_payload}')
-            
-            payment_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v1/merchant/bank-transfer/init-payment',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=account_payload,
-                timeout=30
-            )
-            
-            print(f'📥 Monnify account response status: {payment_response.status_code}')
-            print(f'📥 Monnify account response body: {payment_response.text}')
-            
-            if payment_response.status_code != 200:
-                error_msg = f'Monnify dynamic account generation failed with status {payment_response.status_code}: {payment_response.text}'
-                print(f'❌ {error_msg}')
-                raise Exception(error_msg)
-            
-            payment_json = payment_response.json()
-            
-            if not payment_json.get('requestSuccessful', False):
-                error_msg = f"Monnify account generation failed: {payment_json.get('responseMessage', 'Unknown error')}"
-                print(f'❌ {error_msg}')
-                raise Exception(error_msg)
-            
-            response_data = payment_json['responseBody']
-            
-            result = {
-                'accountNumber': response_data['accountNumber'],
-                'accountName': response_data['accountName'],
-                'bankName': response_data['bankName'],
-                'bankCode': response_data['bankCode'],
-                'ussdCode': response_data.get('ussdCode', ''),
-                'monnifyTransactionReference': monnify_transaction_ref  # Store for webhook matching
-            }
-            
-            print(f'✅ Step 2 complete. Dynamic account generated: {result["accountNumber"]}')
-            return result
-            
-        except Exception as e:
-            print(f'❌ Monnify init payment error: {str(e)}')
             raise
     
     def check_pending_transaction(user_id, transaction_type, amount, phone_number):
@@ -1500,7 +1380,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     @vas_bp.route('/verification/generate-payment', methods=['POST'])
     @token_required
     def generate_verification_payment(current_user):
-        """Generate Quick Pay payment for KYC verification fee (₦70)"""
+        """Generate one-time payment for KYC verification fee (₦70)"""
         try:
             user_id = str(current_user['_id'])
             data = request.get_json()
@@ -1530,7 +1410,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'expiresAt': datetime.utcnow() + timedelta(minutes=30)
             })
             
-            # Generate Quick Pay payment for ₦70 verification fee
+            # Generate one-time payment for ₦70 verification fee
             # Initialize transaction with Monnify first
             access_token = call_monnify_auth()
             
@@ -1871,127 +1751,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
-    # ==================== QUICK PAY ENDPOINTS ====================
-    
-    @vas_bp.route('/quick-pay/initiate', methods=['POST'])
-    @token_required
-    def initiate_quick_pay(current_user):
-        """
-        Initiate a Quick Pay transaction using Monnify One-Time Payment
-        Supports: WALLET_FUNDING, AIRTIME, DATA
-        No wallet needed - direct payment to one-time account
-        """
-        try:
-            data = request.json
-            transaction_type = data.get('type', '').upper()  # 'WALLET_FUNDING', 'AIRTIME', or 'DATA'
-            amount = float(data.get('amount', 0))
-            phone_number = data.get('phoneNumber', '').strip()
-            network = data.get('network', '').upper()
-            
-            # Validate transaction type
-            if transaction_type not in ['WALLET_FUNDING', 'AIRTIME', 'DATA']:
-                return jsonify({
-                    'success': False,
-                    'message': 'Invalid transaction type. Must be WALLET_FUNDING, AIRTIME, or DATA'
-                }), 400
-            
-            # For wallet funding, amount can be 0 (user decides later)
-            # For VAS purchases, amount must be > 0
-            if transaction_type in ['AIRTIME', 'DATA'] and amount <= 0:
-                return jsonify({
-                    'success': False,
-                    'message': 'Invalid amount'
-                }), 400
-            
-            # Phone number and network only required for VAS purchases
-            if transaction_type in ['AIRTIME', 'DATA'] and (not phone_number or not network):
-                return jsonify({
-                    'success': False,
-                    'message': 'Phone number and network are required'
-                }), 400
-            
-            user_id = str(current_user['_id'])
-            
-            # Generate unique transaction reference
-            transaction_ref = f'FICORE_QP_{user_id}_{int(datetime.utcnow().timestamp())}'
-            
-            # For wallet funding, use a placeholder amount (user decides actual amount)
-            # Monnify will accept any amount >= this value
-            monnify_amount = amount if amount > 0 else 100.0  # Minimum ₦100
-            
-            # Store pending transaction (before payment)
-            pending_txn = {
-                '_id': ObjectId(),
-                'userId': ObjectId(user_id),
-                'type': transaction_type,
-                'amount': amount,  # 0 for wallet funding means "any amount"
-                'transactionReference': transaction_ref,
-                'status': 'PENDING_PAYMENT',
-                'paymentMethod': 'QUICK_PAY',
-                'createdAt': datetime.utcnow(),
-                'expiresAt': datetime.utcnow() + timedelta(minutes=30)
-            }
-            
-            # Add phone/network for VAS purchases only
-            if transaction_type in ['AIRTIME', 'DATA']:
-                pending_txn['phoneNumber'] = phone_number
-                pending_txn['network'] = network
-            
-            if transaction_type == 'DATA':
-                pending_txn['dataPlanId'] = data.get('dataPlanId', '')
-                pending_txn['dataPlanName'] = data.get('dataPlanName', '')
-            
-            mongo.db.vas_transactions.insert_one(pending_txn)
-            
-            # Call Monnify to generate one-time payment account
-            customer_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
-            
-            # For wallet funding, set description appropriately
-            payment_description = 'FiCore Liquid Wallet Funding'
-            if transaction_type == 'AIRTIME':
-                payment_description = f'FiCore Airtime Purchase - {network}'
-            elif transaction_type == 'DATA':
-                payment_description = f'FiCore Data Purchase - {network}'
-            
-            monnify_response = call_monnify_init_payment(
-                transaction_reference=transaction_ref,
-                amount=monnify_amount,
-                customer_name=customer_name,
-                customer_email=current_user.get('email', ''),
-                payment_description=payment_description
-            )
-            
-            # Update transaction with Monnify reference for webhook matching
-            mongo.db.vas_transactions.update_one(
-                {'_id': pending_txn['_id']},
-                {'$set': {'monnifyTransactionReference': monnify_response['monnifyTransactionReference']}}
-            )
-            
-            print(f'✅ Quick Pay initiated: {transaction_ref} (Type: {transaction_type})')
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'transactionId': str(pending_txn['_id']),
-                    'transactionReference': transaction_ref,
-                    'accountNumber': monnify_response['accountNumber'],
-                    'accountName': monnify_response['accountName'],
-                    'bankName': monnify_response['bankName'],
-                    'bankCode': monnify_response['bankCode'],
-                    'ussdCode': monnify_response.get('ussdCode', ''),
-                    'amount': monnify_amount,  # Return the actual Monnify amount
-                    'expiresAt': pending_txn['expiresAt'].isoformat() + 'Z'
-                },
-                'message': 'Payment account generated. Transfer to complete purchase.'
-            }), 200
-            
-        except Exception as e:
-            print(f'❌ Error initiating quick pay: {str(e)}')
-            return jsonify({
-                'success': False,
-                'message': 'Failed to initiate payment',
-                'errors': {'general': [str(e)]}
-            }), 500
+    # ==================== WEBHOOK ENDPOINT ====================
     
     @vas_bp.route('/wallet/webhook', methods=['POST'])
     def monnify_webhook():
@@ -2148,105 +1908,135 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             )
             
             if should_process:
-                # Extract transaction details - handle both old eventData format and new flat format
-                if event_type == 'SUCCESSFUL_TRANSACTION' and 'eventData' in data:
-                    # Old format with eventData wrapper
-                    transaction_data = data['eventData']
-                    account_reference = transaction_data.get('product', {}).get('reference', '')
-                    amount_paid = float(transaction_data.get('amountPaid', 0))
-                    transaction_reference = transaction_data.get('transactionReference', '')
-                    payment_reference = transaction_data.get('paymentReference', '')
-                    customer_email = transaction_data.get('customer', {}).get('email', '')
-                else:
-                    # New flat format
-                    account_reference = data.get('accountReference', '')
-                    amount_paid = float(data.get('amountPaid', 0))
-                    transaction_reference = data.get('transactionReference', '')
-                    payment_reference = data.get('paymentReference', '')
-                    customer_email = data.get('customerEmail', '')
+                # ────────────────────────────────────────────────────────────────
+                # IMPROVED EXTRACTION - handles real Monnify reserved account format
+                # ────────────────────────────────────────────────────────────────
+                # Default values
+                account_ref = None
+                amount_paid = 0.0
+                transaction_reference = ''
+                payment_reference = ''
+                customer_email = ''
                 
-                print(f'💳 Processing payment: Ref={transaction_reference}, PayRef={payment_reference}, AccRef={account_reference}, Email={customer_email}, Amount=₦{amount_paid}')
+                print(f"DEBUG full payload top-level keys: {list(data.keys())}")
                 
-                # Handle Quick Pay transactions first
-                # First try to find by Monnify transaction reference
-                pending_txn = mongo.db.vas_transactions.find_one({
-                    'monnifyTransactionReference': transaction_reference,
-                    'status': 'PENDING_PAYMENT'
-                })
-                
-                # Fallback: try to find by payment reference if it's our format
-                if not pending_txn and payment_reference and payment_reference.startswith('FICORE_QP_'):
-                    pending_txn = mongo.db.vas_transactions.find_one({
-                        'transactionReference': payment_reference,
-                        'status': 'PENDING_PAYMENT'
-                    })
-                
-                # Another fallback: try to find by our transaction reference format
-                if not pending_txn and transaction_reference.startswith('FICORE_QP_'):
-                    pending_txn = mongo.db.vas_transactions.find_one({
-                        'transactionReference': transaction_reference,
-                        'status': 'PENDING_PAYMENT'
-                    })
-                
-                if not pending_txn:
-                    print(f'⚠️ No pending transaction found for refs: {transaction_reference}, {payment_reference}')
+                # 1. Classic Monnify format (most common for reserved accounts)
+                if 'eventData' in data:
+                    event_data = data['eventData']
+                    print(f"DEBUG eventData keys: {list(event_data.keys())}")
                     
-                    # Check if this is a reserved account transaction (direct bank transfer)
-                    if account_reference and account_reference.startswith('FICORE_'):
-                        print(f'🏦 Processing reserved account transaction: {account_reference}')
-                        user_id = account_reference.replace('FICORE_', '')
-                        
-                        # Check for duplicate webhook (idempotency)
-                        existing_txn = mongo.db.vas_transactions.find_one({
-                            'reference': transaction_reference,
-                            'type': 'WALLET_FUNDING'
+                    amount_paid = float(event_data.get('amountPaid', 0))
+                    transaction_reference = event_data.get('transactionReference', '')
+                    payment_reference = event_data.get('paymentReference', '')
+                    
+                    # Customer email (fallback)
+                    customer = event_data.get('customer', {})
+                    customer_email = customer.get('email', '')
+                    
+                    # Critical: account reference is usually here
+                    product = event_data.get('product', {})
+                    if product.get('type') == 'RESERVED_ACCOUNT':
+                        account_ref = product.get('reference', '')
+                        print(f"DEBUG: Found reserved account reference → eventData.product.reference = '{account_ref}'")
+                
+                # 2. Possible flat/newer format (less common, but we check anyway)
+                if not account_ref:
+                    account_ref = data.get('accountReference', '')
+                    if account_ref:
+                        print(f"DEBUG: Found top-level accountReference = '{account_ref}'")
+                        amount_paid = float(data.get('amountPaid', amount_paid))
+                        transaction_reference = data.get('transactionReference', transaction_reference)
+                        payment_reference = data.get('paymentReference', payment_reference)
+                        customer_email = data.get('customerEmail', customer_email) or data.get('customer', {}).get('email', '')
+                
+                # 3. Log what we actually got
+                print(f"DEBUG extracted values:")
+                print(f"  - amount_paid          : ₦{amount_paid}")
+                print(f"  - transaction_reference: {transaction_reference}")
+                print(f"  - payment_reference    : {payment_reference}")
+                print(f"  - account_ref          : '{account_ref}'")
+                print(f"  - customer_email       : {customer_email}")
+                
+                if amount_paid <= 0:
+                    print("⚠️ Zero or negative amount - ignoring")
+                    return jsonify({'success': True, 'message': 'Zero amount ignored'}), 200
+                
+                # ────────────────────────────────────────────────────────────────
+                # Now try to identify user and process
+                # ────────────────────────────────────────────────────────────────
+                user_id = None
+                pending_txn = None
+                
+                # Priority 1: From account reference (preferred for reserved accounts)
+                if account_ref:
+                    cleaned = account_ref.replace(" ", "").replace("-", "").replace("_", "").upper()
+                    if cleaned.startswith('FICORE'):
+                        user_part = cleaned[len('FICORE'):]
+                        user_id = user_part.lstrip('0123456789') if user_part.isdigit() else user_part
+                        print(f"✅ Matched FICORE prefix → extracted user_id: {user_id}")
+                
+                # Priority 2: Fallback to email if we have it and no user yet
+                if not user_id and customer_email:
+                    user_doc = mongo.db.users.find_one({'email': customer_email})
+                    if user_doc:
+                        user_id = str(user_doc['_id'])
+                        print(f"✅ Fallback: found user via email {customer_email} → {user_id}")
+                
+                # Priority 3: Try pending transaction matching (KYC payments only)
+                if not user_id:
+                    # Only check for KYC verification payments (₦70)
+                    if amount_paid >= 70.0:
+                        pending_txn = mongo.db.vas_transactions.find_one({
+                            'monnifyTransactionReference': transaction_reference,
+                            'status': 'PENDING_PAYMENT',
+                            'type': 'KYC_VERIFICATION'
                         })
                         
-                        if existing_txn:
-                            print(f'⚠️ Duplicate webhook ignored: {transaction_reference}')
-                            return jsonify({'success': True, 'message': 'Already processed'}), 200
-                        
-                        # Process reserved account funding
-                        return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
-                    
-                    # NEW: Try to find user by customer email if no accountReference
-                    if customer_email:
-                        print(f'🔍 No accountReference, trying to find user by email: {customer_email}')
-                        user = mongo.db.users.find_one({'email': customer_email})
-                        if user:
-                            user_id = str(user['_id'])
-                            print(f'✅ Found user by email: {customer_email} -> {user_id}')
-                            
-                            # Check for duplicate webhook (idempotency)
-                            existing_txn = mongo.db.vas_transactions.find_one({
-                                'reference': transaction_reference,
-                                'type': 'WALLET_FUNDING'
+                        if not pending_txn and payment_reference and payment_reference.startswith('VER_'):
+                            pending_txn = mongo.db.vas_transactions.find_one({
+                                'paymentReference': payment_reference,
+                                'status': 'PENDING_PAYMENT',
+                                'type': 'KYC_VERIFICATION'
                             })
-                            
-                            if existing_txn:
-                                print(f'⚠️ Duplicate webhook ignored: {transaction_reference}')
-                                return jsonify({'success': True, 'message': 'Already processed'}), 200
-                            
-                            # Process as wallet funding
-                            return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
-                        else:
-                            print(f'❌ User not found with email: {customer_email}')
-                    else:
-                        print(f'❌ No customer email found in webhook data')
-                    
-                    print(f'❌ Transaction not found and could not identify user: {transaction_reference}')
-                    return jsonify({'success': False, 'message': 'Transaction not found'}), 404
+                        
+                        if not pending_txn and transaction_reference.startswith('FICORE_QP_'):
+                            pending_txn = mongo.db.vas_transactions.find_one({
+                                'transactionReference': transaction_reference,
+                                'status': 'PENDING_PAYMENT',
+                                'type': 'KYC_VERIFICATION'
+                            })
+                        
+                        if pending_txn:
+                            user_id = str(pending_txn['userId'])
+                            print(f"✅ Found pending KYC verification transaction → user_id: {user_id}")
                 
-                # Process the pending transaction
-                if pending_txn:
-                    user_id = str(pending_txn['userId'])
+                # ────────────────────────────────────────────────────────────────
+                # Decide how to process based on what we found
+                # ────────────────────────────────────────────────────────────────
+                if user_id:
+                    # We have a user → treat as wallet funding (reserved account style)
+                    print(f"Processing as direct reserved account funding for user {user_id}")
+                    
+                    # Idempotency check
+                    existing = mongo.db.vas_transactions.find_one({
+                        'reference': transaction_reference,
+                        'type': 'WALLET_FUNDING',
+                        'status': 'SUCCESS'
+                    })
+                    
+                    if existing:
+                        print(f"Duplicate SUCCESS webhook ignored: {transaction_reference}")
+                        return jsonify({'success': True, 'message': 'Already processed'}), 200
+                    
+                    return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
+                
+                elif pending_txn:
+                    # KYC verification transaction
                     txn_type = pending_txn.get('type')
+                    print(f"Found pending transaction type: {txn_type}")
                     
-                    print(f'✅ Found pending transaction: {pending_txn["transactionReference"]} (Type: {txn_type})')
-                    
-                    # Handle KYC_VERIFICATION payments
                     if txn_type == 'KYC_VERIFICATION':
-                        # Verify the payment amount is correct (₦70)
+                        # Process KYC verification payment
                         if amount_paid < 70.0:
                             print(f'⚠️ KYC verification payment insufficient: ₦{amount_paid} < ₦70')
                             return jsonify({'success': False, 'message': 'Insufficient payment amount'}), 400
@@ -2286,18 +2076,17 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                         print(f'✅ KYC Verification Payment: User {user_id}, Paid: ₦{amount_paid}, Fee: ₦70')
                         return jsonify({'success': True, 'message': 'KYC verification payment processed successfully'}), 200
                     
-                    # Handle WALLET_FUNDING
                     elif txn_type == 'WALLET_FUNDING':
-                        return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
-                    
-                    # Handle AIRTIME/DATA purchases (to be implemented)
-                    elif txn_type in ['AIRTIME', 'DATA']:
-                        print(f'⚠️ Quick Pay VAS purchase not yet implemented: {txn_type}')
-                        return jsonify({'success': False, 'message': 'VAS purchase via Quick Pay not yet implemented'}), 501
+                        return process_reserved_account_funding_inline(str(pending_txn['userId']), amount_paid, transaction_reference, data)
                     
                     else:
-                        print(f'⚠️ Unknown transaction type: {txn_type}')
-                        return jsonify({'success': False, 'message': 'Unknown transaction type'}), 400
+                        print(f"Unhandled pending txn type: {txn_type}")
+                        return jsonify({'success': False, 'message': 'Unhandled transaction type'}), 400
+                
+                else:
+                    print("Could not identify user or pending transaction")
+                    # Still return 200 to Monnify - don't block their retries
+                    return jsonify({'success': True, 'message': 'Acknowledged but unprocessed'}), 200
             
             # If payment status is not PAID or not completed, just acknowledge
             else:
