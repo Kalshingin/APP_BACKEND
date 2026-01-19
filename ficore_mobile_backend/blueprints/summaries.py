@@ -24,69 +24,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             
             activities = []
             
-            # 1. Get VAS transactions
-            try:
-                vas_transactions = list(mongo.db.vas_transactions.find({
-                    'userId': current_user['_id']
-                }).sort('createdAt', -1).limit(limit))
-                
-                print(f"Found {len(vas_transactions)} VAS transactions for user {current_user['_id']}")
-                
-                for txn in vas_transactions:
-                    # Create user-friendly description based on transaction type
-                    txn_type = txn.get('type', 'UNKNOWN')
-                    amount = txn.get('amount', 0)
-                    
-                    print(f"Processing VAS transaction: {txn_type} - ₦{amount}")
-                    
-                    if txn_type == 'WALLET_FUNDING':
-                        title = 'Wallet Funded'
-                        description = f'Added ₦{amount:,.2f} to Liquid Wallet'
-                        icon = 'wallet'
-                    elif txn_type == 'AIRTIME_PURCHASE':
-                        title = 'Airtime Purchase'
-                        phone = txn.get('metadata', {}).get('phoneNumber', 'Unknown')
-                        description = f'₦{amount:,.2f} airtime sent to {phone[-4:]}****' if phone != 'Unknown' else f'₦{amount:,.2f} airtime purchase'
-                        icon = 'phone'
-                    elif txn_type == 'DATA_PURCHASE':
-                        title = 'Data Purchase'
-                        phone = txn.get('metadata', {}).get('phoneNumber', 'Unknown')
-                        plan = txn.get('metadata', {}).get('planName', 'Data')
-                        description = f'{plan} for {phone[-4:]}****' if phone != 'Unknown' else f'₦{amount:,.2f} data purchase'
-                        icon = 'data'
-                    elif txn_type == 'KYC_VERIFICATION':
-                        title = 'KYC Verification'
-                        description = f'Account verification fee ₦{amount:,.2f}'
-                        icon = 'verification'
-                    else:
-                        title = f'VAS {txn_type.replace("_", " ").title()}'
-                        description = f'₦{amount:,.2f} VAS transaction'
-                        icon = 'vas'
-                    
-                    activity = {
-                        'id': str(txn['_id']),
-                        'type': 'VAS',
-                        'subtype': txn_type,
-                        'title': title,
-                        'description': description,
-                        'amount': amount,
-                        'reference': txn.get('reference', ''),
-                        'status': txn.get('status', 'UNKNOWN'),
-                        'provider': txn.get('provider', ''),
-                        'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
-                        'timestamp': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
-                        'icon': icon,
-                        'color': 'blue',
-                        'category': 'VAS Services'
-                    }
-                    activities.append(activity)
-                    print(f"Added VAS activity: {title} - ₦{amount}")
-            except Exception as e:
-                print(f"Error fetching VAS transactions: {e}")
-                import traceback
-                traceback.print_exc()
-
-            # 2. Get recent expenses with smart filtering
+            # 1. Get recent expenses with smart filtering
             try:
                 now = datetime.utcnow()
                 one_minute_ago = now - timedelta(minutes=1)
@@ -123,7 +61,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 import traceback
                 traceback.print_exc()
 
-            # 3. Get recent incomes with smart filtering
+            # 2. Get recent incomes with smart filtering
             try:
                 now = datetime.utcnow()
                 one_minute_ago = now - timedelta(minutes=1)

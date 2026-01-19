@@ -1193,7 +1193,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             data = request.json
             bvn = data.get('bvn', '').strip()
             nin = data.get('nin', '').strip()
-            dob = data.get('dateOfBirth', '').strip()  # Format: DD-MMM-YYYY
+            dob = data.get('dateOfBirth', '').strip()  # Format from frontend: DD/MM/YYYY
+            
+            print(f"🔍 BVN Verification Request - BVN: {bvn}, NIN: {nin}, DOB: {dob}")
             
             # Validate
             if len(bvn) != 11 or not bvn.isdigit():
@@ -1212,6 +1214,37 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 return jsonify({
                     'success': False,
                     'message': 'Date of birth is required.'
+                }), 400
+            
+            # Convert date format from DD/MM/YYYY to DD-MMM-YYYY for Monnify
+            try:
+                from datetime import datetime
+                date_obj = datetime.strptime(dob, '%d/%m/%Y')
+                monnify_dob = date_obj.strftime('%d-%b-%Y')  # e.g., 15-Jan-1990
+                print(f"🔍 Date conversion: {dob} -> {monnify_dob}")
+            except ValueError:
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid date format. Please use DD/MM/YYYY.'
+                }), 400
+            
+            # Get user details and validate they're not empty
+            user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
+            user_phone = current_user.get('phoneNumber', '').strip()
+            user_email = current_user.get('email', '').strip()
+            
+            print(f"🔍 User details - Name: '{user_name}', Phone: '{user_phone}', Email: '{user_email}'")
+            
+            if not user_name:
+                return jsonify({
+                    'success': False,
+                    'message': 'User name is required. Please update your profile.'
+                }), 400
+            
+            if not user_phone:
+                return jsonify({
+                    'success': False,
+                    'message': 'Phone number is required. Please update your profile.'
                 }), 400
             
             # Check eligibility first
@@ -1235,12 +1268,11 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 }), 400
             
             # Call Monnify BVN verification (₦10 cost - absorbed by business)
-            user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
             bvn_response = call_monnify_bvn_verification(
                 bvn=bvn,
                 name=user_name,
-                dob=dob,
-                mobile=current_user.get('phoneNumber', '')
+                dob=monnify_dob,  # Use converted format
+                mobile=user_phone
             )
             
             # Check BVN match status
@@ -3213,6 +3245,56 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
+    @vas_bp.route('/reserved-accounts', methods=['GET'])
+    @token_required
+    def get_reserved_accounts(current_user):
+        """Get user's reserved accounts (alias for backward compatibility)"""
+        return get_reserved_account(current_user)
+    
+    @vas_bp.route('/reserved-accounts/with-banks', methods=['GET'])
+    @token_required
+    def get_reserved_accounts_with_banks(current_user):
+        """Get user's reserved accounts with available banks"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            # Get user's reserved account
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'No wallet found',
+                    'data': None
+                }), 404
+            
+            # Get reserved accounts from wallet
+            reserved_accounts = wallet.get('reservedAccounts', [])
+            if not reserved_accounts:
+                return jsonify({
+                    'success': False,
+                    'message': 'No reserved accounts found',
+                    'data': None
+                }), 404
+            
+            # Return accounts with bank information
+            return jsonify({
+                'success': True,
+                'data': {
+                    'accounts': reserved_accounts,
+                    'preferredBankCode': wallet.get('preferredBankCode'),
+                    'hasMultipleBanks': len(reserved_accounts) > 1
+                },
+                'message': 'Reserved accounts retrieved successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error getting reserved accounts with banks: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to retrieve reserved accounts',
+                'errors': {'general': [str(e)]}
+            }), 500
+
     @vas_bp.route('/reserved-account', methods=['GET'])
     @token_required
     def get_reserved_account(current_user):
