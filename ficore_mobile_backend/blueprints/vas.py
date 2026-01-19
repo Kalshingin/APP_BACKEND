@@ -179,7 +179,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             recommendations = []
             
             if not PEYFLEX_API_TOKEN:
-                recommendations.append("❌ PEYFLEX_API_TOKEN environment variable is not set")
+                recommendations.append("ERROR: PEYFLEX_API_TOKEN environment variable is not set")
             
             for test in diagnostic_results['api_tests']:
                 if not test.get('success', False):
@@ -1346,8 +1346,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }
             mongo.db.business_expenses.insert_one(business_expense)
             
-            print(f'✅ FREE BVN & NIN verification completed for user {user_id}: {user_name}')
-            print(f'💰 Business expense recorded: ₦70 verification costs')
+            print(f'SUCCESS: FREE BVN & NIN verification completed for user {user_id}: {user_name}')
+            print(f'EXPENSE: Business expense recorded: N70 verification costs')
             
             # Return the first account details
             first_account = van_data['accounts'][0] if van_data['accounts'] else {}
@@ -1369,7 +1369,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }), 201
             
         except Exception as e:
-            print(f'❌ Error verifying BVN/NIN: {str(e)}')
+            print(f'ERROR: Error verifying BVN/NIN: {str(e)}')
             return jsonify({
                 'success': False,
                 'message': 'Verification failed',
@@ -1439,9 +1439,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     # REMOVED: Payment-related endpoints no longer needed
     # BVN/NIN verification is now FREE - business absorbs costs
     # Account creation happens immediately after verification
-                'message': 'Failed to verify payment and create account',
-                'errors': {'general': [str(e)]}
-            }), 500
 
     @vas_bp.route('/confirm-kyc', methods=['POST'])
     @token_required
