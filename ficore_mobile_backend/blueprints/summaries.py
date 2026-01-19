@@ -30,10 +30,14 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                     'userId': current_user['_id']
                 }).sort('createdAt', -1).limit(limit))
                 
+                print(f"Found {len(vas_transactions)} VAS transactions for user {current_user['_id']}")
+                
                 for txn in vas_transactions:
                     # Create user-friendly description based on transaction type
                     txn_type = txn.get('type', 'UNKNOWN')
                     amount = txn.get('amount', 0)
+                    
+                    print(f"Processing VAS transaction: {txn_type} - ₦{amount}")
                     
                     if txn_type == 'WALLET_FUNDING':
                         title = 'Wallet Funded'
@@ -76,8 +80,11 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         'category': 'VAS Services'
                     }
                     activities.append(activity)
+                    print(f"Added VAS activity: {title} - ₦{amount}")
             except Exception as e:
                 print(f"Error fetching VAS transactions: {e}")
+                import traceback
+                traceback.print_exc()
 
             # 2. Get recent expenses with smart filtering
             try:
@@ -91,6 +98,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         {'createdAt': {'$gte': one_minute_ago}}  # Recently created entries
                     ]
                 }).sort('createdAt', -1).limit(limit))
+                
+                print(f"Found {len(recent_expenses)} expense transactions for user {current_user['_id']}")
                 
                 for expense in recent_expenses:
                     activity = {
@@ -108,8 +117,11 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         'color': 'red'
                     }
                     activities.append(activity)
+                    print(f"Added expense activity: {activity['title']} - ₦{expense.get('amount', 0)}")
             except Exception as e:
                 print(f"Error fetching expenses: {e}")
+                import traceback
+                traceback.print_exc()
 
             # 3. Get recent incomes with smart filtering
             try:
@@ -123,6 +135,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         {'createdAt': {'$gte': one_minute_ago}}  # Recently created entries
                     ]
                 }).sort('createdAt', -1).limit(limit))
+                
+                print(f"Found {len(recent_incomes)} income transactions for user {current_user['_id']}")
                 
                 for income in recent_incomes:
                     activity = {
@@ -140,14 +154,20 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         'color': 'green'
                     }
                     activities.append(activity)
+                    print(f"Added income activity: {activity['title']} - ₦{income.get('amount', 0)}")
             except Exception as e:
                 print(f"Error fetching incomes: {e}")
+                import traceback
+                traceback.print_exc()
 
             # Sort all activities by date (most recent first)
             activities.sort(key=lambda x: x['date'], reverse=True)
             
             # Limit to requested number
             activities = activities[:limit]
+            
+            print(f"Final activities count: {len(activities)}")
+            print(f"Activity types: {[a['type'] for a in activities[:5]]}")  # Show first 5 types
 
             return jsonify({
                 'success': True,
