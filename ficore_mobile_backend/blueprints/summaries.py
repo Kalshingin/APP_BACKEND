@@ -175,7 +175,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             # Get query parameters
             page = int(request.args.get('page', 1))
             limit = min(int(request.args.get('limit', 20)), 100)
-            activity_type = request.args.get('type', 'all')  # all, expense, income
+            activity_type = request.args.get('type', 'all')  # all, expense, income, vas
             
             activities = []
             
@@ -184,6 +184,62 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             now = datetime.utcnow()
             one_minute_ago = now - timedelta(minutes=1)
             
+            # 1. Get VAS transactions (if type is 'all' or 'vas')
+            if activity_type in ['all', 'vas']:
+                try:
+                    vas_transactions = list(mongo.db.vas_transactions.find({
+                        'userId': current_user['_id']
+                    }).sort('createdAt', -1))
+                    
+                    for txn in vas_transactions:
+                        # Create user-friendly description based on transaction type
+                        txn_type = txn.get('type', 'UNKNOWN')
+                        amount = txn.get('amount', 0)
+                        
+                        if txn_type == 'WALLET_FUNDING':
+                            title = 'Wallet Funded'
+                            description = f'Added ₦{amount:,.2f} to Liquid Wallet'
+                            icon = 'wallet'
+                        elif txn_type == 'AIRTIME_PURCHASE':
+                            title = 'Airtime Purchase'
+                            phone = txn.get('metadata', {}).get('phoneNumber', 'Unknown')
+                            description = f'₦{amount:,.2f} airtime sent to {phone[-4:]}****' if phone != 'Unknown' else f'₦{amount:,.2f} airtime purchase'
+                            icon = 'phone'
+                        elif txn_type == 'DATA_PURCHASE':
+                            title = 'Data Purchase'
+                            phone = txn.get('metadata', {}).get('phoneNumber', 'Unknown')
+                            plan = txn.get('metadata', {}).get('planName', 'Data')
+                            description = f'{plan} for {phone[-4:]}****' if phone != 'Unknown' else f'₦{amount:,.2f} data purchase'
+                            icon = 'data'
+                        elif txn_type == 'KYC_VERIFICATION':
+                            title = 'KYC Verification'
+                            description = f'Account verification fee ₦{amount:,.2f}'
+                            icon = 'verification'
+                        else:
+                            title = f'VAS {txn_type.replace("_", " ").title()}'
+                            description = f'₦{amount:,.2f} VAS transaction'
+                            icon = 'vas'
+                        
+                        activity = {
+                            'id': str(txn['_id']),
+                            'type': 'VAS',
+                            'subtype': txn_type,
+                            'title': title,
+                            'description': description,
+                            'amount': amount,
+                            'reference': txn.get('reference', ''),
+                            'status': txn.get('status', 'UNKNOWN'),
+                            'provider': txn.get('provider', ''),
+                            'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                            'timestamp': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                            'icon': icon,
+                            'color': 'blue',
+                            'category': 'VAS Services'
+                        }
+                        activities.append(activity)
+                except Exception as e:
+                    print(f"Error fetching VAS transactions: {e}")
+
             if activity_type in ['all', 'expense']:
                 try:
                     # HYBRID QUERY: Shows expenses where EITHER:
