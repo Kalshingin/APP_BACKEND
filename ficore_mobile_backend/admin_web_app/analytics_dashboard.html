@@ -772,7 +772,8 @@
         });
         
         // API Helper with timeout
-        async function apiCall(endpoint, timeout = 10000) {
+        async function apiCall(endpoint, timeout = 15000) {
+            console.log(`🌐 API Call: ${endpoint}`);
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), timeout);
             
@@ -788,6 +789,7 @@
                 clearTimeout(timeoutId);
                 
                 if (response.status === 401 || response.status === 403) {
+                    console.error('🔐 Authentication failed for:', endpoint);
                     alert('Session expired. Please login again.');
                     localStorage.removeItem('admin_token');
                     window.location.href = 'admin_login.html';
@@ -795,15 +797,19 @@
                 }
                 
                 if (!response.ok) {
-                    throw new Error(`API call failed: ${response.statusText}`);
+                    throw new Error(`API call failed: ${response.status} ${response.statusText}`);
                 }
                 
-                return await response.json();
+                const data = await response.json();
+                console.log(`✅ API Success: ${endpoint}`);
+                return data;
             } catch (error) {
                 clearTimeout(timeoutId);
                 if (error.name === 'AbortError') {
-                    throw new Error('Request timeout - please try again');
+                    console.error(`⏰ API Timeout: ${endpoint}`);
+                    throw new Error(`Request timeout (${timeout/1000}s) - please try again`);
                 }
+                console.error(`❌ API Error: ${endpoint}`, error);
                 throw error;
             }
         }
@@ -834,22 +840,36 @@
         
         // Load dashboard data
         async function loadDashboard() {
+            console.log('🚀 Starting dashboard load...');
+            
             try {
                 document.getElementById('loading').style.display = 'block';
                 document.getElementById('dashboard-content').style.display = 'none';
                 document.getElementById('error-container').innerHTML = '';
                 
                 // Load treasury metrics first (most important) - with error handling
+                console.log('📊 Loading treasury metrics...');
                 try {
-                    await loadTreasuryMetrics();
+                    await Promise.race([
+                        loadTreasuryMetrics(),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Treasury metrics timeout')), 15000))
+                    ]);
+                    console.log('✅ Treasury metrics loaded successfully');
                 } catch (error) {
-                    console.error('Treasury metrics failed:', error);
+                    console.error('❌ Treasury metrics failed:', error);
+                    document.getElementById('treasury-alert').textContent = '⚠️ Failed to load treasury metrics';
                     // Continue loading other data even if treasury fails
                 }
                 
                 // Load overview - with error handling
+                console.log('📊 Loading dashboard overview...');
                 try {
-                    const overview = await apiCall('/api/analytics/dashboard/overview');
+                    const overview = await Promise.race([
+                        apiCall('/api/analytics/dashboard/overview'),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Overview timeout')), 15000))
+                    ]);
+                    
+                    console.log('✅ Overview loaded successfully');
                     
                     // Update metrics
                     document.getElementById('total-users').textContent = overview.data.users.total.toLocaleString();
@@ -878,7 +898,7 @@
                         activityList.appendChild(item);
                     });
                 } catch (error) {
-                    console.error('Overview loading failed:', error);
+                    console.error('❌ Overview loading failed:', error);
                     // Set default values
                     document.getElementById('total-users').textContent = 'Error';
                     document.getElementById('dau').textContent = 'Error';
@@ -891,8 +911,15 @@
                 }
                 
                 // Load event counts - with error handling
+                console.log('📊 Loading event counts...');
                 try {
-                    const eventCounts = await apiCall('/api/analytics/dashboard/event-counts?period=month');
+                    const eventCounts = await Promise.race([
+                        apiCall('/api/analytics/dashboard/event-counts?period=month'),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Event counts timeout')), 15000))
+                    ]);
+                    
+                    console.log('✅ Event counts loaded successfully');
+                    
                     const eventCountsContainer = document.getElementById('event-counts');
                     eventCountsContainer.innerHTML = '';
                     
@@ -912,8 +939,15 @@
                 }
                 
                 // Load top users - with error handling
+                console.log('📊 Loading top users...');
                 try {
-                    const topUsers = await apiCall('/api/analytics/dashboard/top-users?limit=10&period=month');
+                    const topUsers = await Promise.race([
+                        apiCall('/api/analytics/dashboard/top-users?limit=10&period=month'),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Top users timeout')), 15000))
+                    ]);
+                    
+                    console.log('✅ Top users loaded successfully');
+                    
                     const topUsersBody = document.getElementById('top-users-body');
                     topUsersBody.innerHTML = '';
                     
@@ -928,22 +962,25 @@
                         topUsersBody.appendChild(row);
                     });
                 } catch (error) {
-                    console.error('Top users loading failed:', error);
+                    console.error('❌ Top users loading failed:', error);
                     const topUsersBody = document.getElementById('top-users-body');
                     topUsersBody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #DC2626;">Failed to load top users</td></tr>';
                 }
+                
+                console.log('✅ Dashboard loading completed successfully');
                 
                 // Always show the dashboard content, even if some parts failed
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('dashboard-content').style.display = 'block';
                 
             } catch (error) {
-                console.error('Critical error loading dashboard:', error);
+                console.error('💥 Critical error loading dashboard:', error);
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('error-container').innerHTML = `
                     <div class="error">
                         <strong>Dashboard Loading Error:</strong> ${error.message}
                         <br><small>Some features may not be available. Try refreshing the page.</small>
+                        <br><button onclick="loadDashboard()" style="margin-top: 10px; padding: 5px 10px; background: #3B82F6; color: white; border: none; border-radius: 4px; cursor: pointer;">Retry Loading</button>
                     </div>
                 `;
                 // Still show the dashboard content even with errors
@@ -953,10 +990,15 @@
         
         // Treasury Command Center Functions
         async function loadTreasuryMetrics() {
+            console.log('💰 Loading treasury metrics...');
             try {
-                const response = await apiCall('/admin/treasury/metrics');
+                const response = await Promise.race([
+                    apiCall('/admin/treasury/metrics'),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Treasury API timeout')), 20000))
+                ]);
                 
                 if (response.success) {
+                    console.log('✅ Treasury metrics API response received');
                     const data = response.data;
                     
                     // Update liabilities
@@ -996,11 +1038,23 @@
                     // Update this month's revenue
                     document.getElementById('treasury-revenue-month').textContent = 
                         `₦${data.thisMonth.revenue.toLocaleString('en-NG', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                    console.log('✅ Treasury metrics updated successfully');
+                } else {
+                    throw new Error('Treasury API returned unsuccessful response');
                 }
             } catch (error) {
-                console.error('Error loading treasury metrics:', error);
+                console.error('❌ Error loading treasury metrics:', error);
                 // Show error but don't block dashboard loading
-                document.getElementById('treasury-alert').textContent = '⚠️ Failed to load metrics';
+                document.getElementById('treasury-alert').textContent = `⚠️ Failed to load metrics: ${error.message}`;
+                
+                // Set default values to prevent UI from being empty
+                document.getElementById('treasury-liabilities').textContent = '₦0.00';
+                document.getElementById('treasury-peyflex').textContent = '₦0.00';
+                document.getElementById('treasury-ratio').textContent = '0.0%';
+                document.getElementById('treasury-deposits-today').textContent = '₦0.00';
+                document.getElementById('treasury-deposits-count').textContent = '0';
+                document.getElementById('treasury-revenue-today').textContent = '₦0.00';
+                document.getElementById('treasury-revenue-month').textContent = '₦0.00';
             }
         }
         

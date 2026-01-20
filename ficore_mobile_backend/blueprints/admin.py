@@ -2205,6 +2205,8 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                 {'_id': ObjectId(user_id)},
                 {'$set': {
                     'isSubscribed': True,
+                    'subscriptionStatus': 'active',  # CRITICAL FIX: Add this field for VAS webhook compatibility
+                    'subscriptionPlan': plan_id,  # CRITICAL FIX: Add this field for consistency
                     'subscriptionType': plan_id,
                     'subscriptionStartDate': start_date,
                     'subscriptionEndDate': end_date,
@@ -2357,6 +2359,8 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                 if updated_subscription:
                     user_update_data = {
                         'isSubscribed': updated_subscription.get('isActive', False),
+                        'subscriptionStatus': 'active' if updated_subscription.get('isActive', False) else 'inactive',  # CRITICAL FIX: Add this field
+                        'subscriptionPlan': updated_subscription.get('planId'),  # CRITICAL FIX: Add this field
                         'subscriptionType': updated_subscription.get('planId'),
                         'subscriptionStartDate': updated_subscription.get('startDate'),
                         'subscriptionEndDate': updated_subscription.get('endDate'),
@@ -2450,6 +2454,8 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                 {'_id': ObjectId(user_id)},
                 {'$set': {
                     'isSubscribed': False,
+                    'subscriptionStatus': 'cancelled',  # CRITICAL FIX: Add this field
+                    'subscriptionPlan': None,  # CRITICAL FIX: Clear this field
                     'subscriptionType': None,
                     'subscriptionStartDate': None,
                     'subscriptionEndDate': None,

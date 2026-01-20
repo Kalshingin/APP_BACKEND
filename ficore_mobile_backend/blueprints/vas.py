@@ -1663,7 +1663,28 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 
                 # Check if user is premium (no deposit fee)
                 user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
-                is_premium = user.get('subscriptionStatus') == 'active' if user else False
+                is_premium = False
+                if user:
+                    # CRITICAL FIX: Check multiple premium indicators
+                    # 1. Check subscriptionStatus (standard subscription)
+                    subscription_status = user.get('subscriptionStatus')
+                    if subscription_status == 'active':
+                        is_premium = True
+                    
+                    # 2. Check subscription dates (admin granted or standard)
+                    elif user.get('subscriptionStartDate') and user.get('subscriptionEndDate'):
+                        subscription_end = user.get('subscriptionEndDate')
+                        now = datetime.utcnow()
+                        if subscription_end > now:
+                            is_premium = True
+                            print(f'✅ User {user_id} is premium via subscription dates (ends: {subscription_end})')
+                    
+                    # 3. Check if user is admin
+                    elif user.get('isAdmin', False):
+                        is_premium = True
+                        print(f'✅ User {user_id} is premium via admin status')
+                
+                print(f'💰 Premium check for user {user_id}: {is_premium}')
                 
                 # Apply deposit fee (₦30 for non-premium users)
                 deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
@@ -1767,7 +1788,28 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 
                 # Check if user is premium (no deposit fee)
                 user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
-                is_premium = user.get('subscriptionStatus') == 'active' if user else False
+                is_premium = False
+                if user:
+                    # CRITICAL FIX: Check multiple premium indicators
+                    # 1. Check subscriptionStatus (standard subscription)
+                    subscription_status = user.get('subscriptionStatus')
+                    if subscription_status == 'active':
+                        is_premium = True
+                    
+                    # 2. Check subscription dates (admin granted or standard)
+                    elif user.get('subscriptionStartDate') and user.get('subscriptionEndDate'):
+                        subscription_end = user.get('subscriptionEndDate')
+                        now = datetime.utcnow()
+                        if subscription_end > now:
+                            is_premium = True
+                            print(f'✅ User {user_id} is premium via subscription dates (ends: {subscription_end})')
+                    
+                    # 3. Check if user is admin
+                    elif user.get('isAdmin', False):
+                        is_premium = True
+                        print(f'✅ User {user_id} is premium via admin status')
+                
+                print(f'💰 Premium check for user {user_id}: {is_premium}')
                 
                 # Apply deposit fee (₦30 for non-premium users)
                 deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
@@ -2189,6 +2231,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'status': 'PENDING',
                 'provider': None,
                 'requestId': request_id,
+                'transactionReference': request_id,  # CRITICAL: Add this field for unique index
                 'createdAt': datetime.utcnow()
             }
             
@@ -2483,6 +2526,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'status': 'PENDING',
                 'provider': None,
                 'requestId': request_id,
+                'transactionReference': request_id,  # CRITICAL: Add this field for unique index
                 'createdAt': datetime.utcnow()
             }
             
@@ -3100,8 +3144,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             # 2. Get Income transactions
             income_transactions = list(
-                mongo.db.income.find({'userId': ObjectId(user_id)})
-                .sort('date', -1)
+                mongo.db.incomes.find({'userId': ObjectId(user_id)})
+                .sort('createdAt', -1)
             )
             
             for txn in income_transactions:
@@ -3116,14 +3160,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'reference': '',
                     'status': 'SUCCESS',
                     'provider': '',
-                    'date': txn.get('date', datetime.utcnow()).isoformat() + 'Z',
+                    'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
                     'category': txn.get('category', 'Income')
                 })
             
             # 3. Get Expense transactions
             expense_transactions = list(
                 mongo.db.expenses.find({'userId': ObjectId(user_id)})
-                .sort('date', -1)
+                .sort('createdAt', -1)
             )
             
             for txn in expense_transactions:
@@ -3138,7 +3182,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'reference': '',
                     'status': 'SUCCESS',
                     'provider': '',
-                    'date': txn.get('date', datetime.utcnow()).isoformat() + 'Z',
+                    'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
                     'category': txn.get('category', 'Expense')
                 })
             
