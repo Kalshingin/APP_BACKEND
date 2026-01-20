@@ -4076,29 +4076,37 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     @vas_bp.route('/transactions/all', methods=['GET'])
     @token_required
     def get_all_user_transactions(current_user):
-        """Get all user transactions (VAS, Income, Expenses, Credits) in one unified list"""
+        """Get all user transactions (VAS + Income + Expenses) in unified chronological order"""
         try:
             user_id = str(current_user['_id'])
-            
             limit = int(request.args.get('limit', 50))
             skip = int(request.args.get('skip', 0))
             
             all_transactions = []
             
-            # 1. Get VAS transactions
-            vas_transactions = list(
-                mongo.db.vas_transactions.find({'userId': ObjectId(user_id)})
-                .sort('createdAt', -1)
-            )
+            # ────────────────────────────────────────────────────────────────
+            # 1. VAS Transactions - strict type filter
+            # ────────────────────────────────────────────────────────────────
+            vas_query = {
+                'userId': ObjectId(user_id),
+                'type': {
+                    '$in': [
+                        'AIRTIME', 'DATA', 'BILL', 'WALLET_FUNDING',
+                        'REFUND_CORRECTION', 'FEE_REFUND', 'KYC_VERIFICATION',
+                        'ACTIVATION_FEE', 'SUBSCRIPTION_FEE'
+                    ]
+                }
+            }
+            vas_cursor = mongo.db.vas_transactions.find(vas_query).sort('createdAt', -1)
+            vas_transactions = list(vas_cursor)
+            print(f"[VAS] Found {len(vas_transactions)} records for user {user_id}")
             
             for txn in vas_transactions:
-                # Get proper description and category
                 description, category = get_transaction_display_info(txn)
-                
-                # CRITICAL FIX: Ensure createdAt is always a valid datetime
                 created_at = txn.get('createdAt')
                 if not isinstance(created_at, datetime):
                     created_at = datetime.utcnow()
+                    print(f"[VAS WARN] Invalid createdAt for txn {txn['_id']} - using now")
                 
                 all_transactions.append({
                     '_id': str(txn['_id']),
@@ -4114,96 +4122,95 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'createdAt': created_at.isoformat() + 'Z',
                     'date': created_at.isoformat() + 'Z',
                     'category': category,
-                    'billCategory': txn.get('billCategory', ''),
-                    'billProvider': txn.get('billProvider', ''),
                     'metadata': {
                         'phoneNumber': txn.get('phoneNumber', ''),
                         'planName': txn.get('planName', ''),
-                        'accountNumber': txn.get('accountNumber', ''),
                     }
                 })
             
-            # 2. Get Income transactions
-            income_transactions = list(
-                mongo.db.incomes.find({'userId': ObjectId(user_id)})
-                .sort('createdAt', -1)
-            )
+            # ────────────────────────────────────────────────────────────────
+            # 2. Income Transactions
+            # ────────────────────────────────────────────────────────────────
+            income_cursor = mongo.db.incomes.find({'userId': ObjectId(user_id)}).sort('createdAt', -1)
+            income_transactions = list(income_cursor)
+            print(f"[INCOME] Found {len(income_transactions)} records for user {user_id}")
             
             for txn in income_transactions:
-                # CRITICAL FIX: Ensure createdAt is always a valid datetime
                 created_at = txn.get('createdAt')
                 if not isinstance(created_at, datetime):
                     created_at = datetime.utcnow()
+                    print(f"[INCOME WARN] Invalid createdAt for income {txn['_id']} - using now")
                 
                 all_transactions.append({
                     '_id': str(txn['_id']),
                     'type': 'INCOME',
                     'subtype': 'INCOME',
                     'amount': txn.get('amount', 0),
-                    'amountPaid': txn.get('amount', 0),
-                    'fee': 0,
                     'description': txn.get('description', 'Income received'),
                     'title': txn.get('source', 'Income'),
                     'source': txn.get('source', 'Unknown'),
                     'reference': '',
                     'status': 'SUCCESS',
-                    'provider': '',
                     'createdAt': created_at.isoformat() + 'Z',
                     'date': created_at.isoformat() + 'Z',
                     'category': txn.get('category', 'Income')
                 })
             
-            # 3. Get Expense transactions
-            expense_transactions = list(
-                mongo.db.expenses.find({'userId': ObjectId(user_id)})
-                .sort('createdAt', -1)
-            )
+            # ────────────────────────────────────────────────────────────────
+            # 3. Expense Transactions
+            # ────────────────────────────────────────────────────────────────
+            expense_cursor = mongo.db.expenses.find({'userId': ObjectId(user_id)}).sort('createdAt', -1)
+            expense_transactions = list(expense_cursor)
+            print(f"[EXPENSE] Found {len(expense_transactions)} records for user {user_id}")
             
             for txn in expense_transactions:
-                # CRITICAL FIX: Ensure createdAt is always a valid datetime
                 created_at = txn.get('createdAt')
                 if not isinstance(created_at, datetime):
                     created_at = datetime.utcnow()
+                    print(f"[EXPENSE WARN] Invalid createdAt for expense {txn['_id']} - using now")
                 
                 all_transactions.append({
                     '_id': str(txn['_id']),
                     'type': 'EXPENSE',
                     'subtype': 'EXPENSE',
-                    'amount': -txn.get('amount', 0),  # Negative for expenses
-                    'amountPaid': txn.get('amount', 0),
-                    'fee': 0,
-                    'description': txn.get('description', 'Expense'),
-                    'title': txn.get('title', 'Expense'),  # CRITICAL FIX: Add missing title field
+                    'amount': -txn.get('amount', 0),
+                    'description': txn.get('description', 'Expense recorded'),
+                    'title': txn.get('title', 'Expense'),
                     'reference': '',
                     'status': 'SUCCESS',
-                    'provider': '',
                     'createdAt': created_at.isoformat() + 'Z',
                     'date': created_at.isoformat() + 'Z',
                     'category': txn.get('category', 'Expense')
                 })
             
-            # CRITICAL FIX: Sort all transactions by date (newest first) after merging
-            # This ensures proper chronological order across all transaction types
+            # ────────────────────────────────────────────────────────────────
+            # Final sort (newest first) + pagination
+            # ────────────────────────────────────────────────────────────────
             all_transactions.sort(key=lambda x: x['createdAt'], reverse=True)
+            paginated = all_transactions[skip:skip + limit]
             
-            # Apply pagination
-            paginated_transactions = all_transactions[skip:skip + limit]
+            print(f"[SUMMARY] Total: {len(all_transactions)} | Paginated: {len(paginated)}")
+            if paginated:
+                types = [t['type'] for t in paginated[:5]]
+                print(f"[SUMMARY] First 5 types: {types}")
             
             return jsonify({
                 'success': True,
-                'data': paginated_transactions,
+                'data': paginated,
                 'total': len(all_transactions),
                 'limit': limit,
                 'skip': skip,
-                'message': 'All transactions retrieved successfully'
+                'message': 'All transactions loaded successfully'
             }), 200
             
         except Exception as e:
-            print(f'❌ Error getting all transactions: {str(e)}')
+            print(f"[ERROR] /vas/transactions/all failed: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             return jsonify({
                 'success': False,
-                'message': 'Failed to retrieve transactions',
-                'errors': {'general': [str(e)]}
+                'message': 'Failed to load transactions',
+                'error': str(e)
             }), 500
 
     @vas_bp.route('/transactions', methods=['GET'])
