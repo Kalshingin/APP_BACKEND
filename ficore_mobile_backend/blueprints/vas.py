@@ -214,6 +214,278 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }), 500
 
 
+    @vas_bp.route('/diagnostic/peyflex-documentation-test', methods=['GET'])
+    @token_required
+    def diagnostic_peyflex_documentation_test(current_user):
+        """Test Peyflex API endpoints exactly as shown in documentation"""
+        try:
+            # Only allow admin users
+            if not current_user.get('isAdmin', False):
+                return jsonify({
+                    'success': False,
+                    'message': 'Admin access required'
+                }), 403
+            
+            results = {
+                'timestamp': datetime.utcnow().isoformat(),
+                'documentation_compliance_test': True,
+                'environment': {
+                    'PEYFLEX_BASE_URL': PEYFLEX_BASE_URL,
+                    'PEYFLEX_API_TOKEN_SET': bool(PEYFLEX_API_TOKEN),
+                    'PEYFLEX_API_TOKEN_LENGTH': len(PEYFLEX_API_TOKEN) if PEYFLEX_API_TOKEN else 0,
+                    'PEYFLEX_API_TOKEN_PREVIEW': f"{PEYFLEX_API_TOKEN[:8]}...{PEYFLEX_API_TOKEN[-4:]}" if PEYFLEX_API_TOKEN and len(PEYFLEX_API_TOKEN) > 12 else "NOT_SET"
+                },
+                'tests': []
+            }
+            
+            # Test 1: Airtime Networks (NO AUTH - per documentation)
+            print("🧪 Testing Airtime Networks (No Auth)")
+            test_1 = {
+                'name': 'Airtime Networks (No Auth)',
+                'endpoint': '/api/airtime/networks/',
+                'auth_required': False,
+                'documentation_note': 'No authentication is required. Just direct get.'
+            }
+            try:
+                url = f'{PEYFLEX_BASE_URL}/api/airtime/networks/'
+                response = requests.get(url, timeout=15)  # No headers per docs
+                
+                test_1.update({
+                    'status_code': response.status_code,
+                    'success': response.status_code == 200,
+                    'response_length': len(response.text),
+                    'response_preview': response.text[:200]
+                })
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        test_1['json_valid'] = True
+                        test_1['response_type'] = type(data).__name__
+                        if isinstance(data, dict):
+                            test_1['json_keys'] = list(data.keys())
+                        elif isinstance(data, list):
+                            test_1['json_count'] = len(data)
+                    except:
+                        test_1['json_valid'] = False
+                        
+            except Exception as e:
+                test_1.update({
+                    'success': False,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                })
+            
+            results['tests'].append(test_1)
+            
+            # Test 2: Data Networks (WITH AUTH - per documentation)
+            print("🧪 Testing Data Networks (With Auth)")
+            test_2 = {
+                'name': 'Data Networks (With Auth)',
+                'endpoint': '/api/data/networks/',
+                'auth_required': True,
+                'documentation_note': 'Requires Authorization: Token header'
+            }
+            try:
+                headers = {
+                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
+                    'Content-Type': 'application/json'
+                }
+                url = f'{PEYFLEX_BASE_URL}/api/data/networks/'
+                response = requests.get(url, headers=headers, timeout=15)
+                
+                test_2.update({
+                    'status_code': response.status_code,
+                    'success': response.status_code == 200,
+                    'response_length': len(response.text),
+                    'response_preview': response.text[:200]
+                })
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        test_2['json_valid'] = True
+                        test_2['response_type'] = type(data).__name__
+                        if isinstance(data, dict):
+                            test_2['json_keys'] = list(data.keys())
+                        elif isinstance(data, list):
+                            test_2['json_count'] = len(data)
+                    except:
+                        test_2['json_valid'] = False
+                elif response.status_code == 403:
+                    test_2['diagnosis'] = 'API token invalid, account not activated, or IP not whitelisted'
+                        
+            except Exception as e:
+                test_2.update({
+                    'success': False,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                })
+            
+            results['tests'].append(test_2)
+            
+            # Test 3: Data Plans Sample (WITH AUTH)
+            print("🧪 Testing Data Plans Sample")
+            test_3 = {
+                'name': 'Data Plans Sample (mtn)',
+                'endpoint': '/api/data/plans/?network=mtn',
+                'auth_required': True,
+                'documentation_note': 'Test with simple network name'
+            }
+            try:
+                headers = {
+                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
+                    'Content-Type': 'application/json'
+                }
+                url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network=mtn'
+                response = requests.get(url, headers=headers, timeout=15)
+                
+                test_3.update({
+                    'status_code': response.status_code,
+                    'success': response.status_code == 200,
+                    'response_length': len(response.text),
+                    'response_preview': response.text[:200]
+                })
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        test_3['json_valid'] = True
+                        test_3['response_type'] = type(data).__name__
+                        if isinstance(data, dict):
+                            test_3['json_keys'] = list(data.keys())
+                        elif isinstance(data, list):
+                            test_3['json_count'] = len(data)
+                    except:
+                        test_3['json_valid'] = False
+                elif response.status_code == 403:
+                    test_3['diagnosis'] = 'API token invalid, account not activated, or IP not whitelisted'
+                elif response.status_code == 404:
+                    test_3['diagnosis'] = 'Network "mtn" not found - try full network IDs like "mtn_gifting_data"'
+                        
+            except Exception as e:
+                test_3.update({
+                    'success': False,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                })
+            
+            results['tests'].append(test_3)
+            
+            # Test 4: Data Purchase Simulation (WITH AUTH)
+            print("🧪 Testing Data Purchase Simulation")
+            test_4 = {
+                'name': 'Data Purchase Simulation',
+                'endpoint': '/api/data/purchase/',
+                'auth_required': True,
+                'documentation_note': 'Test with sample data purchase payload (simulation only)',
+                'warning': 'This is a simulation test - no actual purchase will be made'
+            }
+            try:
+                headers = {
+                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
+                    'Content-Type': 'application/json'
+                }
+                
+                # Use test data from documentation (this should not actually charge)
+                test_payload = {
+                    "network": "mtn",
+                    "plan_code": "TEST_PLAN",  # Use a test plan code
+                    "mobile_number": "08144216361"  # Test number from docs
+                }
+                
+                url = f'{PEYFLEX_BASE_URL}/api/data/purchase/'
+                response = requests.post(url, headers=headers, json=test_payload, timeout=15)
+                
+                test_4.update({
+                    'status_code': response.status_code,
+                    'success': response.status_code == 200,
+                    'response_length': len(response.text),
+                    'response_preview': response.text[:200],
+                    'test_payload': test_payload
+                })
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        test_4['json_valid'] = True
+                        test_4['response_type'] = type(data).__name__
+                        if isinstance(data, dict):
+                            test_4['json_keys'] = list(data.keys())
+                    except:
+                        test_4['json_valid'] = False
+                elif response.status_code == 403:
+                    test_4['diagnosis'] = 'API token invalid, account not activated, or IP not whitelisted'
+                elif response.status_code == 422:
+                    test_4['diagnosis'] = 'Invalid plan code or network - this is expected for test data'
+                elif response.status_code == 400:
+                    test_4['diagnosis'] = 'Bad request - check payload format'
+                        
+            except Exception as e:
+                test_4.update({
+                    'success': False,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                })
+            
+            results['tests'].append(test_4)
+            
+            # Summary
+            successful_tests = sum(1 for test in results['tests'] if test.get('success', False))
+            total_tests = len(results['tests'])
+            
+            results['summary'] = {
+                'total_tests': total_tests,
+                'successful_tests': successful_tests,
+                'failed_tests': total_tests - successful_tests,
+                'success_rate': f"{(successful_tests/total_tests*100):.1f}%" if total_tests > 0 else "0%"
+            }
+            
+            if successful_tests == 0:
+                results['diagnosis'] = "All tests failed - likely API token or account activation issue"
+                results['recommendations'] = [
+                    "Verify API token is correct in environment variables",
+                    "Check if Peyflex account is activated for API access",
+                    "Confirm account has sufficient balance",
+                    "Contact Peyflex support to verify account status",
+                    "Check if server IP needs to be whitelisted"
+                ]
+            elif successful_tests == 1 and results['tests'][0].get('success'):
+                results['diagnosis'] = "Only airtime networks working - authentication/account issue for data services"
+                results['recommendations'] = [
+                    "Airtime networks work (no auth) but data services fail (with auth)",
+                    "This indicates API token or account activation issue",
+                    "Contact Peyflex support to activate data services for your account",
+                    "Verify account has data service permissions"
+                ]
+            elif successful_tests < total_tests:
+                results['diagnosis'] = "Partial success - some endpoints working"
+                results['recommendations'] = [
+                    "Check failed endpoints for specific error messages",
+                    "Verify network IDs match Peyflex's expected format",
+                    "Some endpoints may require different authentication",
+                    "Test with real plan codes from working data plans endpoint"
+                ]
+            else:
+                results['diagnosis'] = "All tests passed - Peyflex API is working correctly"
+                results['recommendations'] = [
+                    "API integration is healthy",
+                    "Monitor for any intermittent issues",
+                    "Consider implementing retry logic for production",
+                    "Test with real transactions in small amounts"
+                ]
+            
+            return jsonify({
+                'success': True,
+                'data': results
+            }), 200
+            
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'message': f'Diagnostic test failed: {str(e)}'
+            }), 500
+
     @vas_bp.route('/diagnostic/peyflex-direct-test', methods=['GET'])
     @token_required
     def diagnostic_peyflex_direct_test(current_user):
@@ -993,19 +1265,20 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     
     
     def call_peyflex_airtime(network, amount, phone_number, request_id):
-        """Call Peyflex Airtime API with correct format"""
+        """Call Peyflex Airtime API with exact format from documentation"""
         # Use the exact format from Peyflex documentation
         payload = {
-            'network': network.lower(),  # Use lowercase as per docs
+            'network': network.lower(),  # Documentation shows lowercase: "mtn"
             'amount': int(amount),
             'mobile_number': phone_number
+            # NOTE: Do NOT send request_id - not shown in documentation example
         }
         
         print(f'📤 Peyflex airtime purchase payload: {payload}')
         print(f'📤 Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
         
         headers = {
-            'Authorization': f'Token {PEYFLEX_API_TOKEN}',
+            'Authorization': f'Token {PEYFLEX_API_TOKEN}',  # Documentation shows "Token" not "Bearer"
             'Content-Type': 'application/json',
             'User-Agent': 'FiCore-Backend/1.0'
         }
@@ -1013,31 +1286,131 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         url = f'{PEYFLEX_BASE_URL}/api/airtime/topup/'
         print(f'📡 Calling Peyflex airtime API: {url}')
         
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            print(f'📥 Peyflex airtime response: {response.status_code}')
+            print(f'📥 Response body: {response.text[:500]}')
+            
+            if response.status_code == 200:
+                try:
+                    return response.json()
+                except Exception as json_error:
+                    print(f'❌ Error parsing Peyflex airtime response: {json_error}')
+                    raise Exception(f'Invalid response format from Peyflex: {json_error}')
+            elif response.status_code == 400:
+                print('🚨 Peyflex airtime API returned 400 Bad Request')
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('message', response.text)
+                except:
+                    error_msg = response.text
+                raise Exception(f'Invalid airtime request: {error_msg}')
+            elif response.status_code == 403:
+                print('🚨 Peyflex airtime API returned 403 Forbidden')
+                print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
+                raise Exception('Airtime service access denied - check API credentials and account status')
+            elif response.status_code == 404:
+                print('🚨 Peyflex airtime API returned 404 Not Found')
+                raise Exception('Airtime endpoint not found - check API URL')
+            else:
+                print(f'🚨 Peyflex airtime API error: {response.status_code} - {response.text}')
+                raise Exception(f'Peyflex airtime API error: {response.status_code} - {response.text}')
+                
+        except requests.exceptions.ConnectionError as e:
+            print(f'❌ Connection error to Peyflex: {str(e)}')
+            raise Exception('Unable to connect to Peyflex servers - check network connectivity')
+        except requests.exceptions.Timeout as e:
+            print(f'❌ Timeout error to Peyflex: {str(e)}')
+            raise Exception('Peyflex API request timed out - try again later')
+        except Exception as e:
+            if 'Invalid response format' in str(e) or 'Invalid airtime request' in str(e) or 'access denied' in str(e):
+                raise  # Re-raise our custom exceptions
+            print(f'❌ Unexpected error calling Peyflex: {str(e)}')
+            raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
+    def call_peyflex_data(network, data_plan_code, phone_number, request_id):
+        """Call Peyflex Data Purchase API with exact format from documentation"""
+        # Use the exact format from Peyflex documentation
+        payload = {
+            'network': network.lower(),  # Documentation shows lowercase network names
+            'plan_code': data_plan_code,  # Use plan_code as shown in docs
+            'mobile_number': phone_number
+            # NOTE: Do NOT send request_id - not shown in documentation example
+        }
         
-        print(f'📥 Peyflex airtime response: {response.status_code}')
-        print(f'📥 Response body: {response.text[:500]}')
+        print(f'📤 Peyflex data purchase payload: {payload}')
+        print(f'📤 Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
         
-        if response.status_code == 200:
-            try:
-                return response.json()
-            except Exception as json_error:
-                print(f'❌ Error parsing Peyflex airtime response: {json_error}')
-                raise Exception(f'Invalid response format from Peyflex: {json_error}')
-        elif response.status_code == 400:
-            print('🚨 Peyflex airtime API returned 400 Bad Request')
-            raise Exception(f'Invalid airtime request: {response.text}')
-        elif response.status_code == 403:
-            print('🚨 Peyflex airtime API returned 403 Forbidden')
-            raise Exception('Airtime service access denied - check credentials')
-        else:
-            print(f'🚨 Peyflex airtime API error: {response.status_code} - {response.text}')
-            raise Exception(f'Peyflex airtime API error: {response.status_code} - {response.text}')
+        headers = {
+            'Authorization': f'Token {PEYFLEX_API_TOKEN}',  # Documentation shows "Token" not "Bearer"
+            'Content-Type': 'application/json',
+            'User-Agent': 'FiCore-Backend/1.0'
+        }
+        
+        url = f'{PEYFLEX_BASE_URL}/api/data/purchase/'
+        print(f'📡 Calling Peyflex data purchase API: {url}')
+        
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            print(f'📥 Peyflex data purchase response: {response.status_code}')
+            print(f'📥 Response body: {response.text[:500]}')
+            
+            if response.status_code == 200:
+                try:
+                    return response.json()
+                except Exception as json_error:
+                    print(f'❌ Error parsing Peyflex data purchase response: {json_error}')
+                    raise Exception(f'Invalid response format from Peyflex: {json_error}')
+            elif response.status_code == 400:
+                print('🚨 Peyflex data purchase API returned 400 Bad Request')
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('message', response.text)
+                except:
+                    error_msg = response.text
+                raise Exception(f'Invalid data purchase request: {error_msg}')
+            elif response.status_code == 403:
+                print('🚨 Peyflex data purchase API returned 403 Forbidden')
+                print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
+                raise Exception('Data purchase service access denied - check API credentials and account status')
+            elif response.status_code == 404:
+                print('🚨 Peyflex data purchase API returned 404 Not Found')
+                raise Exception('Data purchase endpoint not found - check API URL')
+            elif response.status_code == 422:
+                print('🚨 Peyflex data purchase API returned 422 Unprocessable Entity')
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('message', 'Invalid plan code or network')
+                except:
+                    error_msg = 'Invalid plan code or network'
+                raise Exception(f'Data purchase validation failed: {error_msg}')
+            else:
+                print(f'🚨 Peyflex data purchase API error: {response.status_code} - {response.text}')
+                raise Exception(f'Peyflex data purchase API error: {response.status_code} - {response.text}')
+                
+        except requests.exceptions.ConnectionError as e:
+            print(f'❌ Connection error to Peyflex: {str(e)}')
+            raise Exception('Unable to connect to Peyflex servers - check network connectivity')
+        except requests.exceptions.Timeout as e:
+            print(f'❌ Timeout error to Peyflex: {str(e)}')
+            raise Exception('Peyflex API request timed out - try again later')
+        except Exception as e:
+            if 'Invalid response format' in str(e) or 'Invalid data purchase' in str(e) or 'access denied' in str(e):
+                raise  # Re-raise our custom exceptions
+            print(f'❌ Unexpected error calling Peyflex: {str(e)}')
+            raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
+
     # ==================== WALLET ENDPOINTS ====================
     
     @vas_bp.route('/wallet/create', methods=['POST'])
@@ -2738,6 +3111,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         try:
             print('🔍 Fetching data networks from Peyflex')
             
+            # According to Peyflex docs, data networks endpoint requires authentication
             headers = {
                 'Authorization': f'Token {PEYFLEX_API_TOKEN}',
                 'Content-Type': 'application/json',
@@ -2747,65 +3121,111 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             url = f'{PEYFLEX_BASE_URL}/api/data/networks/'
             print(f'📡 Calling Peyflex networks API: {url}')
             
-            response = requests.get(url, headers=headers, timeout=30)
-            print(f'📥 Peyflex networks response status: {response.status_code}')
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    print(f'📊 Peyflex response: {data}')
-                    
-                    # Handle the correct response format: {"networks": [...]}
-                    if isinstance(data, dict) and 'networks' in data:
-                        networks_list = data['networks']
-                        print(f'✅ Found {len(networks_list)} networks in response')
+            try:
+                response = requests.get(url, headers=headers, timeout=30)
+                print(f'📥 Peyflex networks response status: {response.status_code}')
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        print(f'📊 Peyflex response: {data}')
+                        
+                        # Handle the correct response format from documentation
+                        networks_list = []
+                        if isinstance(data, dict):
+                            if 'networks' in data:
+                                networks_list = data['networks']
+                                print(f'✅ Found {len(networks_list)} networks in response.networks')
+                            elif 'data' in data:
+                                networks_list = data['data']
+                                print(f'✅ Found {len(networks_list)} networks in response.data')
+                            else:
+                                print(f'⚠️ Dict response without networks/data key: {list(data.keys())}')
+                                networks_list = []
+                        elif isinstance(data, list):
+                            networks_list = data
+                            print(f'✅ Direct array with {len(networks_list)} networks')
+                        else:
+                            print(f'⚠️ Unexpected response format: {data}')
+                            networks_list = []
                         
                         # Transform to our format
                         transformed_networks = []
                         for network in networks_list:
-                            transformed_networks.append({
-                                'id': network.get('identifier', ''),
-                                'name': network.get('name', '')
-                            })
+                            if not isinstance(network, dict):
+                                print(f'⚠️ Skipping non-dict network: {network}')
+                                continue
+                                
+                            network_data = {
+                                'id': network.get('identifier', network.get('id', network.get('code', ''))),
+                                'name': network.get('name', network.get('label', 'Unknown Network'))
+                            }
+                            
+                            # Only add networks with valid data
+                            if network_data['id'] and network_data['name']:
+                                transformed_networks.append(network_data)
+                            else:
+                                print(f'⚠️ Skipping invalid network: {network}')
                         
-                        return jsonify({
-                            'success': True,
-                            'data': transformed_networks,
-                            'message': 'Data networks retrieved from Peyflex',
-                            'source': 'peyflex_api'
-                        }), 200
-                    else:
-                        print('⚠️ Unexpected response format from Peyflex')
-                        raise Exception('Unexpected response format')
+                        print(f'✅ Successfully transformed {len(transformed_networks)} valid networks')
                         
-                except Exception as json_error:
-                    print(f'❌ Error parsing Peyflex networks response: {json_error}')
-                    raise Exception(f'Invalid networks response from Peyflex: {json_error}')
-            
-            else:
-                print(f'🚨 Peyflex networks API error: {response.status_code} - {response.text}')
-                raise Exception(f'Peyflex networks API returned {response.status_code}')
+                        if len(transformed_networks) > 0:
+                            return jsonify({
+                                'success': True,
+                                'data': transformed_networks,
+                                'message': 'Data networks retrieved from Peyflex',
+                                'source': 'peyflex_api'
+                            }), 200
+                        else:
+                            print('⚠️ No valid networks found in Peyflex response')
+                            # Fall through to fallback
+                            
+                    except Exception as json_error:
+                        print(f'❌ Error parsing Peyflex networks response: {json_error}')
+                        print(f'📄 Raw response: {response.text}')
+                        # Fall through to fallback
+                
+                elif response.status_code == 403:
+                    print('🚨 Peyflex networks API returned 403 Forbidden')
+                    print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
+                    # Fall through to fallback
+                
+                else:
+                    print(f'🚨 Peyflex networks API error: {response.status_code} - {response.text}')
+                    # Fall through to fallback
+                    
+            except requests.exceptions.ConnectionError as e:
+                print(f'❌ Connection error to Peyflex: {str(e)}')
+                # Fall through to fallback
+            except requests.exceptions.Timeout as e:
+                print(f'❌ Timeout error to Peyflex: {str(e)}')
+                # Fall through to fallback
+            except Exception as e:
+                print(f'❌ Unexpected error calling Peyflex: {str(e)}')
+                # Fall through to fallback
             
         except Exception as e:
-            print(f'❌ Error getting networks from Peyflex: {str(e)}')
-            
-            # Return fallback networks based on what actually works
-            networks = [
-                {'id': 'mtn_gifting_data', 'name': 'MTN (Gifting)'},
-                {'id': 'mtn_data_share', 'name': 'MTN (Data Share)'},
-                {'id': 'airtel_data', 'name': 'Airtel'},
-                {'id': 'glo_data', 'name': 'Glo Data'},
-                {'id': '9mobile_data', 'name': '9mobile (CG)'},
-                {'id': '9mobile_gifting', 'name': '9mobile (Gifting)'}
-            ]
-            
-            return jsonify({
-                'success': True,
-                'data': networks,
-                'message': 'Fallback data networks (based on Peyflex API discovery)',
-                'emergency': True,
-                'error': str(e)
-            }), 200
+            print(f'❌ Error in get_data_networks: {str(e)}')
+            # Fall through to fallback
+        
+        # Return fallback networks based on what actually works
+        print('🔄 Using fallback data networks')
+        networks = [
+            {'id': 'mtn_gifting_data', 'name': 'MTN (Gifting)'},
+            {'id': 'mtn_sme_data', 'name': 'MTN (SME)'},
+            {'id': 'airtel_data', 'name': 'Airtel'},
+            {'id': 'glo_data', 'name': 'Glo Data'},
+            {'id': '9mobile_data', 'name': '9mobile (CG)'},
+            {'id': '9mobile_gifting', 'name': '9mobile (Gifting)'}
+        ]
+        
+        return jsonify({
+            'success': True,
+            'data': networks,
+            'message': 'Fallback data networks (Peyflex API unavailable)',
+            'source': 'fallback',
+            'note': 'Check Peyflex API credentials and account status'
+        }), 200
     
     @vas_bp.route('/data-plans/<network>', methods=['GET'])
     @token_required
@@ -2814,15 +3234,26 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         try:
             print(f'🔍 Fetching data plans for network: {network}')
             
-            # Validate network ID against known working networks
-            valid_networks = [
-                'mtn_gifting_data', 'mtn_data_share', 'airtel_data', 
-                'glo_data', '9mobile_data', '9mobile_gifting'
-            ]
+            # Validate network ID format - Peyflex uses specific network identifiers
+            network = network.lower().strip()
             
-            if network not in valid_networks:
-                print(f'⚠️ Network {network} not in valid list: {valid_networks}')
-                # Try anyway, but log the warning
+            # Known working networks based on Peyflex API discovery
+            known_networks = {
+                'mtn': 'mtn_gifting_data',  # Map simple names to full IDs
+                'mtn_gifting': 'mtn_gifting_data',
+                'mtn_sme': 'mtn_sme_data',
+                'airtel': 'airtel_data',
+                'glo': 'glo_data',
+                '9mobile': '9mobile_data'
+            }
+            
+            # Use full network ID if available
+            if network in known_networks:
+                full_network_id = known_networks[network]
+                print(f'📝 Mapped {network} to {full_network_id}')
+            else:
+                full_network_id = network
+                print(f'📝 Using network ID as-is: {full_network_id}')
             
             headers = {
                 'Authorization': f'Token {PEYFLEX_API_TOKEN}',
@@ -2830,74 +3261,113 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'User-Agent': 'FiCore-Backend/1.0'
             }
             
-            url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={network}'
+            url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={full_network_id}'
             print(f'📡 Calling Peyflex plans API: {url}')
             
-            response = requests.get(url, headers=headers, timeout=30)
-            print(f'📥 Peyflex plans response status: {response.status_code}')
-            print(f'📥 Response preview: {response.text[:500]}')
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    print(f'📊 Peyflex plans response type: {type(data)}')
+            try:
+                response = requests.get(url, headers=headers, timeout=30)
+                print(f'📥 Peyflex plans response status: {response.status_code}')
+                print(f'📥 Response preview: {response.text[:500]}')
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        print(f'📊 Peyflex plans response type: {type(data)}')
+                        
+                        # Handle the correct response format from documentation
+                        plans_list = []
+                        if isinstance(data, dict):
+                            if 'plans' in data:
+                                plans_list = data['plans']
+                                print(f'✅ Found {len(plans_list)} plans in response.plans')
+                            elif 'data' in data:
+                                plans_list = data['data']
+                                print(f'✅ Found {len(plans_list)} plans in response.data')
+                            else:
+                                print(f'⚠️ Dict response without plans/data key: {list(data.keys())}')
+                                # Try to use the dict itself if it looks like a plan
+                                if 'plan_code' in data or 'amount' in data:
+                                    plans_list = [data]
+                                else:
+                                    plans_list = []
+                        elif isinstance(data, list):
+                            plans_list = data
+                            print(f'✅ Direct array with {len(plans_list)} plans')
+                        else:
+                            print(f'⚠️ Unexpected response format: {data}')
+                            plans_list = []
+                        
+                        # Transform to our format
+                        transformed_plans = []
+                        for plan in plans_list:
+                            if not isinstance(plan, dict):
+                                print(f'⚠️ Skipping non-dict plan: {plan}')
+                                continue
+                                
+                            transformed_plan = {
+                                'id': plan.get('plan_code', plan.get('id', '')),
+                                'name': plan.get('label', plan.get('name', plan.get('plan_name', 'Unknown Plan'))),
+                                'price': float(plan.get('amount', plan.get('price', 0))),
+                                'validity': plan.get('validity', plan.get('duration', 30)),  # Default 30 days
+                                'plan_code': plan.get('plan_code', plan.get('id', ''))
+                            }
+                            
+                            # Only add plans with valid data
+                            if transformed_plan['id'] and transformed_plan['price'] > 0:
+                                transformed_plans.append(transformed_plan)
+                            else:
+                                print(f'⚠️ Skipping invalid plan: {plan}')
+                        
+                        print(f'✅ Successfully transformed {len(transformed_plans)} valid plans')
+                        
+                        if len(transformed_plans) > 0:
+                            return jsonify({
+                                'success': True,
+                                'data': transformed_plans,
+                                'message': f'Data plans for {network.upper()}',
+                                'source': 'peyflex_api',
+                                'network_id': full_network_id
+                            }), 200
+                        else:
+                            print(f'⚠️ No valid plans found for {full_network_id}')
+                            # Fall through to fallback
+                            
+                    except Exception as json_error:
+                        print(f'❌ Error parsing Peyflex plans response: {json_error}')
+                        print(f'📄 Raw response: {response.text}')
+                        # Fall through to fallback
+                
+                elif response.status_code == 404:
+                    print(f'🚨 Network {full_network_id} not found on Peyflex (404)')
+                    # Fall through to fallback
+                
+                elif response.status_code == 403:
+                    print(f'🚨 Peyflex plans API returned 403 Forbidden')
+                    print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
+                    # Fall through to fallback
+                
+                else:
+                    print(f'🚨 Peyflex plans API error: {response.status_code} - {response.text}')
+                    # Fall through to fallback
                     
-                    # Handle the correct response format: {"network": "...", "plans": [...]}
-                    plans_list = []
-                    if isinstance(data, dict) and 'plans' in data:
-                        plans_list = data['plans']
-                        print(f'✅ Found {len(plans_list)} plans in response')
-                    elif isinstance(data, list):
-                        plans_list = data
-                        print(f'✅ Direct array with {len(plans_list)} plans')
-                    else:
-                        print(f'⚠️ Unexpected response format: {data}')
-                        raise Exception('Unexpected response format')
-                    
-                    # Transform to our format
-                    transformed_plans = []
-                    for plan in plans_list:
-                        transformed_plan = {
-                            'id': plan.get('plan_code', ''),
-                            'name': plan.get('label', plan.get('name', '')),
-                            'price': float(plan.get('amount', plan.get('price', 0))),
-                            'validity': 30,  # Default, Peyflex doesn't always provide this
-                            'plan_code': plan.get('plan_code', '')
-                        }
-                        transformed_plans.append(transformed_plan)
-                    
-                    print(f'✅ Successfully transformed {len(transformed_plans)} plans')
-                    return jsonify({
-                        'success': True,
-                        'data': transformed_plans,
-                        'message': f'Data plans for {network.upper()}',
-                        'source': 'peyflex_api'
-                    }), 200
-                    
-                except Exception as json_error:
-                    print(f'❌ Error parsing Peyflex plans response: {json_error}')
-                    raise Exception(f'Invalid plans response from Peyflex: {json_error}')
-            
-            elif response.status_code == 404:
-                print(f'🚨 Network {network} not found on Peyflex (404)')
-                # Return empty array for invalid networks
-                return jsonify({
-                    'success': True,
-                    'data': [],
-                    'message': f'Network {network} not available on Peyflex',
-                    'error': 'NETWORK_NOT_FOUND'
-                }), 200
-            
-            else:
-                print(f'🚨 Peyflex plans API error: {response.status_code} - {response.text}')
-                raise Exception(f'Peyflex plans API returned {response.status_code}')
+            except requests.exceptions.ConnectionError as e:
+                print(f'❌ Connection error to Peyflex: {str(e)}')
+                # Fall through to fallback
+            except requests.exceptions.Timeout as e:
+                print(f'❌ Timeout error to Peyflex: {str(e)}')
+                # Fall through to fallback
+            except Exception as e:
+                print(f'❌ Unexpected error calling Peyflex: {str(e)}')
+                # Fall through to fallback
             
         except Exception as e:
-            print(f'❌ Error getting data plans from Peyflex: {str(e)}')
-            
-            # Return emergency fallback plans
-            emergency_plans = _get_fallback_data_plans(network)
-            return jsonify({
+            print(f'❌ Error in get_data_plans: {str(e)}')
+            # Fall through to fallback
+        
+        # Return emergency fallback plans
+        print(f'🔄 Using fallback plans for {network}')
+        emergency_plans = _get_fallback_data_plans(network)
+        return jsonify({
                 'success': True,
                 'data': emergency_plans,
                 'message': f'Emergency data plans for {network.upper()} (Peyflex unavailable)',
