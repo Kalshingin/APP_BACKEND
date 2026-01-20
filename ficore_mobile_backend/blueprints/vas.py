@@ -31,6 +31,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     MONNIFY_CONTRACT_CODE = os.environ.get('MONNIFY_CONTRACT_CODE', '')
     MONNIFY_BASE_URL = os.environ.get('MONNIFY_BASE_URL', 'https://sandbox.monnify.com')
     
+    # Monnify Bills API specific
+    MONNIFY_BILLS_BASE_URL = f"{MONNIFY_BASE_URL}/api/v1/vas/bills-payment"
+    
     PEYFLEX_API_TOKEN = os.environ.get('PEYFLEX_API_TOKEN', '')
     PEYFLEX_BASE_URL = os.environ.get('PEYFLEX_BASE_URL', 'https://client.peyflex.com.ng')
     
@@ -43,6 +46,73 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     ACTIVATION_FEE = 100.0
     BVN_VERIFICATION_COST = 10.0
     NIN_VERIFICATION_COST = 60.0
+    
+    # ==================== MONNIFY BILLS API HELPERS ====================
+    
+    def get_monnify_access_token():
+        """Get Monnify access token for Bills API"""
+        try:
+            import base64
+            
+            # Create basic auth header
+            credentials = f"{MONNIFY_API_KEY}:{MONNIFY_SECRET_KEY}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+            
+            headers = {
+                'Authorization': f'Basic {encoded_credentials}',
+                'Content-Type': 'application/json'
+            }
+            
+            url = f"{MONNIFY_BASE_URL}/api/v1/auth/login"
+            
+            response = requests.post(url, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('requestSuccessful'):
+                    access_token = data['responseBody']['accessToken']
+                    print(f'✅ Monnify access token obtained: {access_token[:20]}...')
+                    return access_token
+                else:
+                    raise Exception(f"Monnify auth failed: {data.get('responseMessage', 'Unknown error')}")
+            else:
+                raise Exception(f"Monnify auth HTTP error: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            print(f'❌ Failed to get Monnify access token: {str(e)}')
+            raise Exception(f'Monnify authentication failed: {str(e)}')
+    
+    def call_monnify_bills_api(endpoint, method='GET', data=None, access_token=None):
+        """Generic Monnify Bills API caller"""
+        try:
+            if not access_token:
+                access_token = get_monnify_access_token()
+            
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            url = f"{MONNIFY_BILLS_BASE_URL}/{endpoint}"
+            
+            if method.upper() == 'GET':
+                response = requests.get(url, headers=headers, timeout=30)
+            elif method.upper() == 'POST':
+                response = requests.post(url, headers=headers, json=data, timeout=30)
+            else:
+                raise Exception(f"Unsupported HTTP method: {method}")
+            
+            print(f'📡 Monnify Bills API {method} {endpoint}: {response.status_code}')
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f'❌ Monnify Bills API error: {response.status_code} - {response.text}')
+                raise Exception(f'Monnify Bills API error: {response.status_code} - {response.text}')
+                
+        except Exception as e:
+            print(f'❌ Monnify Bills API call failed: {str(e)}')
+            raise Exception(f'Monnify Bills API failed: {str(e)}')
     
     # ==================== DIAGNOSTIC ENDPOINTS ====================
     
@@ -239,7 +309,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }
             
             # Test 1: Airtime Networks (NO AUTH - per documentation)
-            print("🧪 Testing Airtime Networks (No Auth)")
+            print("🔬 Testing Airtime Networks (No Auth)")
             test_1 = {
                 'name': 'Airtime Networks (No Auth)',
                 'endpoint': '/api/airtime/networks/',
@@ -279,7 +349,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             results['tests'].append(test_1)
             
             # Test 2: Data Networks (WITH AUTH - per documentation)
-            print("🧪 Testing Data Networks (With Auth)")
+            print("🔬 Testing Data Networks (With Auth)")
             test_2 = {
                 'name': 'Data Networks (With Auth)',
                 'endpoint': '/api/data/networks/',
@@ -325,7 +395,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             results['tests'].append(test_2)
             
             # Test 3: Data Plans Sample (WITH AUTH)
-            print("🧪 Testing Data Plans Sample")
+            print("🔬 Testing Data Plans Sample")
             test_3 = {
                 'name': 'Data Plans Sample (mtn)',
                 'endpoint': '/api/data/plans/?network=mtn',
@@ -373,7 +443,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             results['tests'].append(test_3)
             
             # Test 4: Data Purchase Simulation (WITH AUTH)
-            print("🧪 Testing Data Purchase Simulation")
+            print("🔬 Testing Data Purchase Simulation")
             test_4 = {
                 'name': 'Data Purchase Simulation',
                 'endpoint': '/api/data/purchase/',
@@ -1041,80 +1111,113 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     @vas_bp.route('/networks/airtime', methods=['GET'])
     @token_required
     def get_airtime_networks(current_user):
-        """Get available airtime networks from Peyflex API"""
+        """Get available airtime networks from Monnify Bills API (primary) with Peyflex fallback"""
         try:
-            print('🔍 Fetching airtime networks from Peyflex')
+            print('🔍 Fetching airtime networks from Monnify Bills API')
             
-            # According to docs, no auth required for airtime networks
-            url = f'{PEYFLEX_BASE_URL}/api/airtime/networks/'
-            print(f'📡 Calling Peyflex airtime networks API: {url}')
-            
-            response = requests.get(url, timeout=30)
-            print(f'📥 Peyflex airtime networks response status: {response.status_code}')
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    print(f'📊 Peyflex airtime response: {data}')
-                    
-                    # Handle different response formats
-                    networks_list = []
-                    if isinstance(data, dict) and 'networks' in data:
-                        networks_list = data['networks']
-                    elif isinstance(data, list):
-                        networks_list = data
-                    else:
-                        print('⚠️ Unexpected airtime networks response format')
-                        raise Exception('Unexpected response format')
-                    
-                    # Transform to our format
-                    transformed_networks = []
-                    for network in networks_list:
-                        if isinstance(network, dict):
-                            transformed_networks.append({
-                                'id': network.get('id', network.get('identifier', network.get('network_id', ''))),
-                                'name': network.get('name', network.get('network_name', ''))
-                            })
-                        elif isinstance(network, str):
-                            # Handle simple string format
-                            transformed_networks.append({
-                                'id': network.lower(),
-                                'name': network.upper()
-                            })
-                    
-                    print(f'✅ Successfully transformed {len(transformed_networks)} airtime networks')
-                    return jsonify({
-                        'success': True,
-                        'data': transformed_networks,
-                        'message': 'Airtime networks retrieved from Peyflex',
-                        'source': 'peyflex_api'
-                    }), 200
-                    
-                except Exception as json_error:
-                    print(f'❌ Error parsing Peyflex airtime networks response: {json_error}')
-                    raise Exception(f'Invalid airtime networks response from Peyflex: {json_error}')
-            
-            else:
-                print(f'🚨 Peyflex airtime networks API error: {response.status_code} - {response.text}')
-                raise Exception(f'Peyflex airtime networks API returned {response.status_code}')
+            # Try Monnify first
+            try:
+                access_token = get_monnify_access_token()
+                billers_response = call_monnify_bills_api(
+                    'billers?category_code=AIRTIME&size=100',
+                    'GET',
+                    access_token=access_token
+                )
+                
+                # Transform Monnify billers to our format
+                networks = []
+                for biller in billers_response['responseBody']['content']:
+                    networks.append({
+                        'id': biller['name'].lower().replace(' ', '_'),
+                        'name': biller['name'],
+                        'code': biller['code'],
+                        'source': 'monnify'
+                    })
+                
+                print(f'✅ Successfully retrieved {len(networks)} airtime networks from Monnify')
+                return jsonify({
+                    'success': True,
+                    'data': networks,
+                    'message': 'Airtime networks retrieved from Monnify Bills API',
+                    'source': 'monnify_bills'
+                }), 200
+                
+            except Exception as monnify_error:
+                print(f'⚠️ Monnify airtime networks failed: {str(monnify_error)}')
+                
+                # Fallback to Peyflex
+                print('🔄 Falling back to Peyflex for airtime networks')
+                
+                url = f'{PEYFLEX_BASE_URL}/api/airtime/networks/'
+                print(f'📡 Calling Peyflex airtime networks API: {url}')
+                
+                response = requests.get(url, timeout=30)
+                print(f'📥 Peyflex airtime networks response status: {response.status_code}')
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        print(f'📊 Peyflex airtime response: {data}')
+                        
+                        # Handle different response formats
+                        networks_list = []
+                        if isinstance(data, dict) and 'networks' in data:
+                            networks_list = data['networks']
+                        elif isinstance(data, list):
+                            networks_list = data
+                        else:
+                            print('⚠️ Unexpected airtime networks response format')
+                            raise Exception('Unexpected response format')
+                        
+                        # Transform to our format
+                        transformed_networks = []
+                        for network in networks_list:
+                            if isinstance(network, dict):
+                                transformed_networks.append({
+                                    'id': network.get('id', network.get('identifier', network.get('network_id', ''))),
+                                    'name': network.get('name', network.get('network_name', '')),
+                                    'source': 'peyflex'
+                                })
+                            elif isinstance(network, str):
+                                # Handle simple string format
+                                transformed_networks.append({
+                                    'id': network.lower(),
+                                    'name': network.upper(),
+                                    'source': 'peyflex'
+                                })
+                        
+                        print(f'✅ Successfully transformed {len(transformed_networks)} airtime networks from Peyflex')
+                        return jsonify({
+                            'success': True,
+                            'data': transformed_networks,
+                            'message': 'Airtime networks retrieved from Peyflex (fallback)',
+                            'source': 'peyflex_fallback'
+                        }), 200
+                        
+                    except Exception as json_error:
+                        print(f'❌ Error parsing Peyflex airtime networks response: {json_error}')
+                        raise Exception(f'Invalid airtime networks response from Peyflex: {json_error}')
+                
+                else:
+                    print(f'🚨 Peyflex airtime networks API error: {response.status_code} - {response.text}')
+                    raise Exception(f'Peyflex airtime networks API returned {response.status_code}')
             
         except Exception as e:
-            print(f'❌ Error getting airtime networks from Peyflex: {str(e)}')
+            print(f'❌ Error getting airtime networks from both providers: {str(e)}')
             
             # Return fallback airtime networks
             networks = [
-                {'id': 'mtn', 'name': 'MTN'},
-                {'id': 'airtel', 'name': 'Airtel'},
-                {'id': 'glo', 'name': 'Glo'},
-                {'id': '9mobile', 'name': '9mobile'}
+                {'id': 'mtn', 'name': 'MTN', 'source': 'fallback'},
+                {'id': 'airtel', 'name': 'Airtel', 'source': 'fallback'},
+                {'id': 'glo', 'name': 'Glo', 'source': 'fallback'},
+                {'id': '9mobile', 'name': '9mobile', 'source': 'fallback'}
             ]
             
             return jsonify({
                 'success': True,
                 'data': networks,
-                'message': 'Fallback airtime networks (Peyflex unavailable)',
-                'emergency': True,
-                'error': str(e)
+                'message': 'Emergency fallback airtime networks (both providers unavailable)',
+                'emergency': True
             }), 200
 
 # ==================== HELPER FUNCTIONS ====================
@@ -1333,6 +1436,382 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 raise  # Re-raise our custom exceptions
             print(f'❌ Unexpected error calling Peyflex: {str(e)}')
             raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
+
+    # ==================== MONNIFY BILLS API FUNCTIONS ====================
+    
+    def call_monnify_airtime(network, amount, phone_number, request_id):
+        """Call Monnify Bills API for airtime purchase"""
+        try:
+            # Step 1: Get access token
+            access_token = get_monnify_access_token()
+            
+            # Step 2: Map network to Monnify biller code
+            network_mapping = {
+                'MTN': 'MTN',
+                'AIRTEL': 'AIRTEL', 
+                'GLO': 'GLO',
+                '9MOBILE': '9MOBILE'
+            }
+            
+            monnify_network = network_mapping.get(network.upper())
+            if not monnify_network:
+                raise Exception(f'Unsupported network for Monnify: {network}')
+            
+            # Step 3: Find airtime product for this network
+            # Get billers for AIRTIME category
+            billers_response = call_monnify_bills_api(
+                f'billers?category_code=AIRTIME&size=100', 
+                'GET', 
+                access_token=access_token
+            )
+            
+            target_biller = None
+            for biller in billers_response['responseBody']['content']:
+                if biller['name'].upper() == monnify_network:
+                    target_biller = biller
+                    break
+            
+            if not target_biller:
+                raise Exception(f'Monnify biller not found for network: {network}')
+            
+            # Step 4: Get airtime products for this biller
+            products_response = call_monnify_bills_api(
+                f'biller-products?biller_code={target_biller["code"]}&size=100',
+                'GET',
+                access_token=access_token
+            )
+            
+            # Find airtime product (usually has "Top up" or "Airtime" in name)
+            airtime_product = None
+            for product in products_response['responseBody']['content']:
+                if 'airtime' in product['name'].lower() or 'top up' in product['name'].lower():
+                    airtime_product = product
+                    break
+            
+            if not airtime_product:
+                raise Exception(f'Monnify airtime product not found for {network}')
+            
+            print(f'📱 Using Monnify product: {airtime_product["name"]} (Code: {airtime_product["code"]})')
+            
+            # Step 5: Validate customer (phone number)
+            validation_data = {
+                'productCode': airtime_product['code'],
+                'customerId': phone_number
+            }
+            
+            validation_response = call_monnify_bills_api(
+                'validate-customer',
+                'POST',
+                validation_data,
+                access_token=access_token
+            )
+            
+            print(f'✅ Monnify customer validation successful for {phone_number}')
+            
+            # Step 6: Prepare vend request
+            vend_data = {
+                'productCode': airtime_product['code'],
+                'customerId': phone_number,
+                'amount': int(amount),
+                'reference': request_id,  # Use our unique request ID
+                'phoneNumber': phone_number,
+                'emailAddress': 'customer@ficoreafrica.com'  # Default email
+            }
+            
+            # Check if validation reference is required
+            vend_instruction = validation_response['responseBody'].get('vendInstruction', {})
+            if vend_instruction.get('requireValidationRef', False):
+                validation_ref = validation_response['responseBody'].get('validationReference')
+                if validation_ref:
+                    vend_data['validationReference'] = validation_ref
+                    print(f'🔐 Using validation reference: {validation_ref}')
+            
+            # Step 7: Execute vend (purchase)
+            vend_response = call_monnify_bills_api(
+                'vend',
+                'POST', 
+                vend_data,
+                access_token=access_token
+            )
+            
+            vend_result = vend_response['responseBody']
+            
+            if vend_result.get('vendStatus') == 'SUCCESS':
+                print(f'✅ Monnify airtime purchase successful: {vend_result["transactionReference"]}')
+                return {
+                    'success': True,
+                    'transactionReference': vend_result['transactionReference'],
+                    'vendReference': vend_result['vendReference'],
+                    'description': vend_result.get('description', 'Airtime purchase successful'),
+                    'provider': 'monnify',
+                    'vendAmount': vend_result.get('vendAmount', amount),
+                    'payableAmount': vend_result.get('payableAmount', amount),
+                    'commission': vend_result.get('commission', 0)
+                }
+            elif vend_result.get('vendStatus') == 'IN_PROGRESS':
+                # Poll for status
+                print(f'⏳ Monnify transaction in progress, checking status...')
+                import time
+                time.sleep(3)  # Wait 3 seconds
+                
+                requery_response = call_monnify_bills_api(
+                    f'requery?reference={request_id}',
+                    'GET',
+                    access_token=access_token
+                )
+                
+                final_result = requery_response['responseBody']
+                if final_result.get('vendStatus') == 'SUCCESS':
+                    print(f'✅ Monnify airtime purchase completed: {final_result["transactionReference"]}')
+                    return {
+                        'success': True,
+                        'transactionReference': final_result['transactionReference'],
+                        'vendReference': final_result['vendReference'],
+                        'description': final_result.get('description', 'Airtime purchase successful'),
+                        'provider': 'monnify',
+                        'vendAmount': final_result.get('vendAmount', amount),
+                        'payableAmount': final_result.get('payableAmount', amount),
+                        'commission': final_result.get('commission', 0)
+                    }
+                else:
+                    raise Exception(f'Monnify transaction failed: {final_result.get("description", "Unknown error")}')
+            else:
+                raise Exception(f'Monnify vend failed: {vend_result.get("description", "Unknown error")}')
+                
+        except Exception as e:
+            print(f'❌ Monnify airtime purchase failed: {str(e)}')
+            raise Exception(f'Monnify airtime failed: {str(e)}')
+    
+    def call_monnify_data(network, data_plan_code, phone_number, request_id):
+        """Call Monnify Bills API for data purchase"""
+        try:
+            # Step 1: Get access token
+            access_token = get_monnify_access_token()
+            
+            # Step 2: Map network to Monnify biller code
+            network_mapping = {
+                'MTN': 'MTN',
+                'AIRTEL': 'AIRTEL',
+                'GLO': 'GLO', 
+                '9MOBILE': '9MOBILE'
+            }
+            
+            monnify_network = network_mapping.get(network.upper())
+            if not monnify_network:
+                raise Exception(f'Unsupported network for Monnify: {network}')
+            
+            # Step 3: Find data biller for this network
+            billers_response = call_monnify_bills_api(
+                f'billers?category_code=DATA_BUNDLE&size=100',
+                'GET',
+                access_token=access_token
+            )
+            
+            target_biller = None
+            for biller in billers_response['responseBody']['content']:
+                if biller['name'].upper() == monnify_network:
+                    target_biller = biller
+                    break
+            
+            if not target_biller:
+                raise Exception(f'Monnify data biller not found for network: {network}')
+            
+            # Step 4: Get data products for this biller
+            products_response = call_monnify_bills_api(
+                f'biller-products?biller_code={target_biller["code"]}&size=200',
+                'GET',
+                access_token=access_token
+            )
+            
+            # Find matching data product by plan code or name
+            data_product = None
+            for product in products_response['responseBody']['content']:
+                # Try to match by code first, then by name patterns
+                if (product['code'] == data_plan_code or 
+                    data_plan_code in product.get('name', '') or
+                    any(keyword in product.get('name', '').lower() for keyword in ['data', 'gb', 'mb'])):
+                    data_product = product
+                    break
+            
+            if not data_product:
+                # Use first available data product as fallback
+                data_products = [p for p in products_response['responseBody']['content'] 
+                               if 'data' in p.get('name', '').lower()]
+                if data_products:
+                    data_product = data_products[0]
+                    print(f'⚠️ Using fallback data product: {data_product["name"]}')
+                else:
+                    raise Exception(f'No data products found for {network}')
+            
+            print(f'📊 Using Monnify data product: {data_product["name"]} (Code: {data_product["code"]})')
+            
+            # Step 5: Validate customer
+            validation_data = {
+                'productCode': data_product['code'],
+                'customerId': phone_number
+            }
+            
+            validation_response = call_monnify_bills_api(
+                'validate-customer',
+                'POST',
+                validation_data,
+                access_token=access_token
+            )
+            
+            print(f'✅ Monnify data customer validation successful for {phone_number}')
+            
+            # Step 6: Prepare vend request
+            vend_amount = data_product.get('price', 0)
+            if not vend_amount or vend_amount <= 0:
+                raise Exception(f'Invalid data product price: {vend_amount}')
+            
+            vend_data = {
+                'productCode': data_product['code'],
+                'customerId': phone_number,
+                'amount': vend_amount,
+                'reference': request_id,
+                'phoneNumber': phone_number,
+                'emailAddress': 'customer@ficoreafrica.com'
+            }
+            
+            # Check validation reference requirement
+            vend_instruction = validation_response['responseBody'].get('vendInstruction', {})
+            if vend_instruction.get('requireValidationRef', False):
+                validation_ref = validation_response['responseBody'].get('validationReference')
+                if validation_ref:
+                    vend_data['validationReference'] = validation_ref
+                    print(f'🔐 Using validation reference for data: {validation_ref}')
+            
+            # Step 7: Execute vend
+            vend_response = call_monnify_bills_api(
+                'vend',
+                'POST',
+                vend_data,
+                access_token=access_token
+            )
+            
+            vend_result = vend_response['responseBody']
+            
+            if vend_result.get('vendStatus') == 'SUCCESS':
+                print(f'✅ Monnify data purchase successful: {vend_result["transactionReference"]}')
+                return {
+                    'success': True,
+                    'transactionReference': vend_result['transactionReference'],
+                    'vendReference': vend_result['vendReference'],
+                    'description': vend_result.get('description', 'Data purchase successful'),
+                    'provider': 'monnify',
+                    'vendAmount': vend_result.get('vendAmount', vend_amount),
+                    'payableAmount': vend_result.get('payableAmount', vend_amount),
+                    'commission': vend_result.get('commission', 0),
+                    'productName': data_product['name']
+                }
+            elif vend_result.get('vendStatus') == 'IN_PROGRESS':
+                # Poll for status
+                print(f'⏳ Monnify data transaction in progress, checking status...')
+                import time
+                time.sleep(3)
+                
+                requery_response = call_monnify_bills_api(
+                    f'requery?reference={request_id}',
+                    'GET',
+                    access_token=access_token
+                )
+                
+                final_result = requery_response['responseBody']
+                if final_result.get('vendStatus') == 'SUCCESS':
+                    print(f'✅ Monnify data purchase completed: {final_result["transactionReference"]}')
+                    return {
+                        'success': True,
+                        'transactionReference': final_result['transactionReference'],
+                        'vendReference': final_result['vendReference'],
+                        'description': final_result.get('description', 'Data purchase successful'),
+                        'provider': 'monnify',
+                        'vendAmount': final_result.get('vendAmount', vend_amount),
+                        'payableAmount': final_result.get('payableAmount', vend_amount),
+                        'commission': final_result.get('commission', 0),
+                        'productName': data_product['name']
+                    }
+                else:
+                    raise Exception(f'Monnify data transaction failed: {final_result.get("description", "Unknown error")}')
+            else:
+                raise Exception(f'Monnify data vend failed: {vend_result.get("description", "Unknown error")}')
+                
+        except Exception as e:
+            print(f'❌ Monnify data purchase failed: {str(e)}')
+            raise Exception(f'Monnify data failed: {str(e)}')
+
+    # ==================== PEYFLEX API FUNCTIONS (FALLBACK) ====================
+    
+    def call_peyflex_airtime(network, amount, phone_number, request_id):
+        """Call Peyflex Airtime API with exact format from documentation"""
+        # Use the exact format from Peyflex documentation
+        payload = {
+            'network': network.lower(),  # Documentation shows lowercase: "mtn"
+            'amount': int(amount),
+            'mobile_number': phone_number
+            # NOTE: Do NOT send request_id - not shown in documentation example
+        }
+        
+        print(f'📤 Peyflex airtime purchase payload: {payload}')
+        print(f'📤 Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
+        
+        headers = {
+            'Authorization': f'Token {PEYFLEX_API_TOKEN}',  # Documentation shows "Token" not "Bearer"
+            'Content-Type': 'application/json',
+            'User-Agent': 'FiCore-Backend/1.0'
+        }
+        
+        url = f'{PEYFLEX_BASE_URL}/api/airtime/topup/'
+        print(f'📡 Calling Peyflex airtime API: {url}')
+        
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            print(f'📥 Peyflex airtime response: {response.status_code}')
+            print(f'📥 Response body: {response.text[:500]}')
+            
+            if response.status_code == 200:
+                try:
+                    return response.json()
+                except Exception as json_error:
+                    print(f'❌ Error parsing Peyflex airtime response: {json_error}')
+                    raise Exception(f'Invalid response format from Peyflex: {json_error}')
+            elif response.status_code == 400:
+                print('🚨 Peyflex airtime API returned 400 Bad Request')
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('message', response.text)
+                except:
+                    error_msg = response.text
+                raise Exception(f'Invalid airtime request: {error_msg}')
+            elif response.status_code == 403:
+                print('🚨 Peyflex airtime API returned 403 Forbidden')
+                print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
+                raise Exception('Airtime service access denied - check API credentials and account status')
+            elif response.status_code == 404:
+                print('🚨 Peyflex airtime API returned 404 Not Found')
+                raise Exception('Airtime endpoint not found - check API URL')
+            else:
+                print(f'🚨 Peyflex airtime API error: {response.status_code} - {response.text}')
+                raise Exception(f'Peyflex airtime API error: {response.status_code} - {response.text}')
+                
+        except requests.exceptions.ConnectionError as e:
+            print(f'❌ Connection error to Peyflex: {str(e)}')
+            raise Exception('Unable to connect to Peyflex servers - check network connectivity')
+        except requests.exceptions.Timeout as e:
+            print(f'❌ Timeout error to Peyflex: {str(e)}')
+            raise Exception('Peyflex API request timed out - try again later')
+        except Exception as e:
+            if 'Invalid response format' in str(e) or 'Invalid airtime request' in str(e) or 'access denied' in str(e):
+                raise  # Re-raise our custom exceptions
+            print(f'❌ Unexpected error calling Peyflex: {str(e)}')
+            raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
+    
     def call_peyflex_data(network, data_plan_code, phone_number, request_id):
         """Call Peyflex Data Purchase API with exact format from documentation"""
         # Use the exact format from Peyflex documentation
@@ -1387,14 +1866,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             elif response.status_code == 404:
                 print('🚨 Peyflex data purchase API returned 404 Not Found')
                 raise Exception('Data purchase endpoint not found - check API URL')
-            elif response.status_code == 422:
-                print('🚨 Peyflex data purchase API returned 422 Unprocessable Entity')
-                try:
-                    error_data = response.json()
-                    error_msg = error_data.get('message', 'Invalid plan code or network')
-                except:
-                    error_msg = 'Invalid plan code or network'
-                raise Exception(f'Data purchase validation failed: {error_msg}')
             else:
                 print(f'🚨 Peyflex data purchase API error: {response.status_code} - {response.text}')
                 raise Exception(f'Peyflex data purchase API error: {response.status_code} - {response.text}')
@@ -1406,14 +1877,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             print(f'❌ Timeout error to Peyflex: {str(e)}')
             raise Exception('Peyflex API request timed out - try again later')
         except Exception as e:
-            if 'Invalid response format' in str(e) or 'Invalid data purchase' in str(e) or 'access denied' in str(e):
+            if 'Invalid response format' in str(e) or 'Invalid data purchase request' in str(e) or 'access denied' in str(e):
                 raise  # Re-raise our custom exceptions
             print(f'❌ Unexpected error calling Peyflex: {str(e)}')
             raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
 
-    # ==================== WALLET ENDPOINTS ====================
+    # ==================== NETWORK AND PLANS ENDPOINTS ====================
     
-    @vas_bp.route('/wallet/create', methods=['POST'])
+    @vas_bp.route('/networks/airtime', methods=['GET'])
     @token_required
     def create_wallet(current_user):
         """Create virtual account number (VAN) for user via Monnify"""
@@ -2612,27 +3083,28 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             transaction_id = vas_transaction['_id']
             
             success = False
-            provider = 'peyflex'
+            provider = 'monnify'
             error_message = ''
             api_response = None
             
             try:
-                # Use face value amount for API call (not selling price)
-                api_response = call_peyflex_airtime(network, amount, phone_number, request_id)
+                # Try Monnify first (primary provider)
+                api_response = call_monnify_airtime(network, amount, phone_number, request_id)
                 success = True
-                print(f'✅ Peyflex airtime purchase successful: {request_id}')
-            except Exception as peyflex_error:
-                print(f'⚠️ Peyflex failed: {str(peyflex_error)}')
-                error_message = str(peyflex_error)
+                print(f'✅ Monnify airtime purchase successful: {request_id}')
+            except Exception as monnify_error:
+                print(f'⚠️ Monnify failed: {str(monnify_error)}')
+                error_message = str(monnify_error)
                 
                 try:
-                    api_response = call_vtpass_airtime(network, amount, phone_number, request_id)
-                    provider = 'vtpass'
+                    # Fallback to Peyflex
+                    api_response = call_peyflex_airtime(network, amount, phone_number, request_id)
+                    provider = 'peyflex'
                     success = True
-                    print(f'✅ VTpass airtime purchase successful (fallback): {request_id}')
-                except Exception as vtpass_error:
-                    print(f'❌ VTpass failed: {str(vtpass_error)}')
-                    error_message = f'Both providers failed. Peyflex: {peyflex_error}, VTpass: {vtpass_error}'
+                    print(f'✅ Peyflex airtime purchase successful (fallback): {request_id}')
+                except Exception as peyflex_error:
+                    print(f'❌ Peyflex failed: {str(peyflex_error)}')
+                    error_message = f'Both providers failed. Monnify: {monnify_error}, Peyflex: {peyflex_error}'
             
             if not success:
                 # Update transaction to FAILED
@@ -2907,26 +3379,28 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             transaction_id = vas_transaction['_id']
             
             success = False
-            provider = 'peyflex'
+            provider = 'monnify'
             error_message = ''
             api_response = None
             
             try:
-                api_response = call_peyflex_data(network, data_plan_id, phone_number, request_id)
+                # Try Monnify first (primary provider)
+                api_response = call_monnify_data(network, data_plan_id, phone_number, request_id)
                 success = True
-                print(f'✅ Peyflex data purchase successful: {request_id}')
-            except Exception as peyflex_error:
-                print(f'⚠️ Peyflex failed: {str(peyflex_error)}')
-                error_message = str(peyflex_error)
+                print(f'✅ Monnify data purchase successful: {request_id}')
+            except Exception as monnify_error:
+                print(f'⚠️ Monnify failed: {str(monnify_error)}')
+                error_message = str(monnify_error)
                 
                 try:
-                    api_response = call_vtpass_data(network, data_plan_id, phone_number, request_id)
-                    provider = 'vtpass'
+                    # Fallback to Peyflex
+                    api_response = call_peyflex_data(network, data_plan_id, phone_number, request_id)
+                    provider = 'peyflex'
                     success = True
-                    print(f'✅ VTpass data purchase successful (fallback): {request_id}')
-                except Exception as vtpass_error:
-                    print(f'❌ VTpass failed: {str(vtpass_error)}')
-                    error_message = f'Both providers failed. Peyflex: {peyflex_error}, VTpass: {vtpass_error}'
+                    print(f'✅ Peyflex data purchase successful (fallback): {request_id}')
+                except Exception as peyflex_error:
+                    print(f'❌ Peyflex failed: {str(peyflex_error)}')
+                    error_message = f'Both providers failed. Monnify: {monnify_error}, Peyflex: {peyflex_error}'
             
             if not success:
                 # Update transaction to FAILED
@@ -3107,476 +3581,408 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     @vas_bp.route('/networks/data', methods=['GET'])
     @token_required
     def get_data_networks(current_user):
-        """Get available data networks from Peyflex API with correct response handling"""
+        """Get available data networks from Monnify Bills API (primary) with Peyflex fallback"""
         try:
-            print('🔍 Fetching data networks from Peyflex')
+            print('🔍 Fetching data networks from Monnify Bills API')
             
-            # According to Peyflex docs, data networks endpoint requires authentication
-            headers = {
-                'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                'Content-Type': 'application/json',
-                'User-Agent': 'FiCore-Backend/1.0'
-            }
-            
-            url = f'{PEYFLEX_BASE_URL}/api/data/networks/'
-            print(f'📡 Calling Peyflex networks API: {url}')
-            
+            # Try Monnify first
             try:
-                response = requests.get(url, headers=headers, timeout=30)
-                print(f'📥 Peyflex networks response status: {response.status_code}')
+                access_token = get_monnify_access_token()
+                billers_response = call_monnify_bills_api(
+                    'billers?category_code=DATA_BUNDLE&size=100',
+                    'GET',
+                    access_token=access_token
+                )
                 
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        print(f'📊 Peyflex response: {data}')
-                        
-                        # Handle the correct response format from documentation
-                        networks_list = []
-                        if isinstance(data, dict):
-                            if 'networks' in data:
-                                networks_list = data['networks']
-                                print(f'✅ Found {len(networks_list)} networks in response.networks')
-                            elif 'data' in data:
-                                networks_list = data['data']
-                                print(f'✅ Found {len(networks_list)} networks in response.data')
-                            else:
-                                print(f'⚠️ Dict response without networks/data key: {list(data.keys())}')
-                                networks_list = []
-                        elif isinstance(data, list):
-                            networks_list = data
-                            print(f'✅ Direct array with {len(networks_list)} networks')
-                        else:
-                            print(f'⚠️ Unexpected response format: {data}')
-                            networks_list = []
-                        
-                        # Transform to our format
-                        transformed_networks = []
-                        for network in networks_list:
-                            if not isinstance(network, dict):
-                                print(f'⚠️ Skipping non-dict network: {network}')
-                                continue
-                                
-                            network_data = {
-                                'id': network.get('identifier', network.get('id', network.get('code', ''))),
-                                'name': network.get('name', network.get('label', 'Unknown Network'))
-                            }
-                            
-                            # Only add networks with valid data
-                            if network_data['id'] and network_data['name']:
-                                transformed_networks.append(network_data)
-                            else:
-                                print(f'⚠️ Skipping invalid network: {network}')
-                        
-                        print(f'✅ Successfully transformed {len(transformed_networks)} valid networks')
-                        
-                        if len(transformed_networks) > 0:
-                            return jsonify({
-                                'success': True,
-                                'data': transformed_networks,
-                                'message': 'Data networks retrieved from Peyflex',
-                                'source': 'peyflex_api'
-                            }), 200
-                        else:
-                            print('⚠️ No valid networks found in Peyflex response')
-                            # Fall through to fallback
-                            
-                    except Exception as json_error:
-                        print(f'❌ Error parsing Peyflex networks response: {json_error}')
-                        print(f'📄 Raw response: {response.text}')
-                        # Fall through to fallback
+                # Transform Monnify billers to our format
+                networks = []
+                for biller in billers_response['responseBody']['content']:
+                    networks.append({
+                        'id': biller['name'].lower().replace(' ', '_'),
+                        'name': biller['name'],
+                        'code': biller['code'],
+                        'source': 'monnify'
+                    })
                 
-                elif response.status_code == 403:
-                    print('🚨 Peyflex networks API returned 403 Forbidden')
-                    print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
-                    # Fall through to fallback
+                print(f'✅ Successfully retrieved {len(networks)} data networks from Monnify')
+                return jsonify({
+                    'success': True,
+                    'data': networks,
+                    'message': 'Data networks retrieved from Monnify Bills API',
+                    'source': 'monnify_bills'
+                }), 200
                 
-                else:
-                    print(f'🚨 Peyflex networks API error: {response.status_code} - {response.text}')
-                    # Fall through to fallback
+            except Exception as monnify_error:
+                print(f'⚠️ Monnify data networks failed: {str(monnify_error)}')
+                
+                # Fallback to Peyflex
+                print('🔄 Falling back to Peyflex for data networks')
+                
+                headers = {
+                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'FiCore-Backend/1.0'
+                }
+                
+                url = f'{PEYFLEX_BASE_URL}/api/data/networks/'
+                print(f'📡 Calling Peyflex networks API: {url}')
+                
+                try:
+                    response = requests.get(url, headers=headers, timeout=30)
+                    print(f'📥 Peyflex networks response status: {response.status_code}')
                     
-            except requests.exceptions.ConnectionError as e:
-                print(f'❌ Connection error to Peyflex: {str(e)}')
-                # Fall through to fallback
-            except requests.exceptions.Timeout as e:
-                print(f'❌ Timeout error to Peyflex: {str(e)}')
-                # Fall through to fallback
-            except Exception as e:
-                print(f'❌ Unexpected error calling Peyflex: {str(e)}')
-                # Fall through to fallback
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            print(f'📊 Peyflex response: {data}')
+                            
+                            # Handle the correct response format from documentation
+                            networks_list = []
+                            if isinstance(data, dict):
+                                if 'networks' in data:
+                                    networks_list = data['networks']
+                                    print(f'✅ Found {len(networks_list)} networks in response.networks')
+                                elif 'data' in data:
+                                    networks_list = data['data']
+                                    print(f'✅ Found {len(networks_list)} networks in response.data')
+                                else:
+                                    print(f'⚠️ Dict response without networks/data key: {list(data.keys())}')
+                                    networks_list = []
+                            elif isinstance(data, list):
+                                networks_list = data
+                                print(f'✅ Direct array with {len(networks_list)} networks')
+                            else:
+                                print(f'⚠️ Unexpected response format: {data}')
+                                networks_list = []
+                            
+                            # Transform to our format
+                            transformed_networks = []
+                            for network in networks_list:
+                                if not isinstance(network, dict):
+                                    print(f'⚠️ Skipping non-dict network: {network}')
+                                    continue
+                                    
+                                network_data = {
+                                    'id': network.get('identifier', network.get('id', network.get('code', ''))),
+                                    'name': network.get('name', network.get('label', 'Unknown Network')),
+                                    'source': 'peyflex'
+                                }
+                                
+                                # Only add networks with valid data
+                                if network_data['id'] and network_data['name']:
+                                    transformed_networks.append(network_data)
+                                else:
+                                    print(f'⚠️ Skipping invalid network: {network}')
+                            
+                            print(f'✅ Successfully transformed {len(transformed_networks)} valid networks from Peyflex')
+                            
+                            if len(transformed_networks) > 0:
+                                return jsonify({
+                                    'success': True,
+                                    'data': transformed_networks,
+                                    'message': 'Data networks retrieved from Peyflex (fallback)',
+                                    'source': 'peyflex_fallback'
+                                }), 200
+                            else:
+                                print('⚠️ No valid networks found in Peyflex response')
+                                # Fall through to emergency fallback
+                                
+                        except Exception as json_error:
+                            print(f'❌ Error parsing Peyflex networks response: {json_error}')
+                            print(f'📄 Raw response: {response.text}')
+                            # Fall through to emergency fallback
+                    
+                    elif response.status_code == 403:
+                        print('🚨 Peyflex networks API returned 403 Forbidden')
+                        print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
+                        # Fall through to emergency fallback
+                    
+                    else:
+                        print(f'🚨 Peyflex networks API error: {response.status_code} - {response.text}')
+                        # Fall through to emergency fallback
+                        
+                except requests.exceptions.ConnectionError as e:
+                    print(f'❌ Connection error to Peyflex: {str(e)}')
+                    # Fall through to emergency fallback
+                except requests.exceptions.Timeout as e:
+                    print(f'❌ Timeout error to Peyflex: {str(e)}')
+                    # Fall through to emergency fallback
             
         except Exception as e:
-            print(f'❌ Error in get_data_networks: {str(e)}')
-            # Fall through to fallback
+            print(f'❌ Error getting data networks from both providers: {str(e)}')
         
-        # Return fallback networks based on what actually works
-        print('🔄 Using fallback data networks')
-        networks = [
-            {'id': 'mtn_gifting_data', 'name': 'MTN (Gifting)'},
-            {'id': 'mtn_sme_data', 'name': 'MTN (SME)'},
-            {'id': 'airtel_data', 'name': 'Airtel'},
-            {'id': 'glo_data', 'name': 'Glo Data'},
-            {'id': '9mobile_data', 'name': '9mobile (CG)'},
-            {'id': '9mobile_gifting', 'name': '9mobile (Gifting)'}
+        # Emergency fallback data networks
+        print('🔄 Using emergency fallback data networks')
+        fallback_networks = [
+            {'id': 'mtn', 'name': 'MTN', 'source': 'fallback'},
+            {'id': 'airtel', 'name': 'Airtel', 'source': 'fallback'},
+            {'id': 'glo', 'name': 'Glo', 'source': 'fallback'},
+            {'id': '9mobile', 'name': '9mobile', 'source': 'fallback'}
         ]
         
         return jsonify({
             'success': True,
-            'data': networks,
-            'message': 'Fallback data networks (Peyflex API unavailable)',
-            'source': 'fallback',
-            'note': 'Check Peyflex API credentials and account status'
+            'data': fallback_networks,
+            'message': 'Emergency fallback data networks (both providers unavailable)',
+            'emergency': True
         }), 200
+
+    # ==================== DATA PLANS ENDPOINT ====================
     
     @vas_bp.route('/data-plans/<network>', methods=['GET'])
     @token_required
     def get_data_plans(current_user, network):
-        """Get data plans for a specific network with correct Peyflex API handling"""
+        """Get data plans for a specific network from Monnify Bills API (primary) with Peyflex fallback"""
         try:
             print(f'🔍 Fetching data plans for network: {network}')
             
-            # Validate network ID format - Peyflex uses specific network identifiers
-            network = network.lower().strip()
-            
-            # Known working networks based on Peyflex API discovery
-            known_networks = {
-                'mtn': 'mtn_gifting_data',  # Map simple names to full IDs
-                'mtn_gifting': 'mtn_gifting_data',
-                'mtn_sme': 'mtn_sme_data',
-                'airtel': 'airtel_data',
-                'glo': 'glo_data',
-                '9mobile': '9mobile_data'
-            }
-            
-            # Use full network ID if available
-            if network in known_networks:
-                full_network_id = known_networks[network]
-                print(f'📝 Mapped {network} to {full_network_id}')
-            else:
-                full_network_id = network
-                print(f'📝 Using network ID as-is: {full_network_id}')
-            
-            headers = {
-                'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                'Content-Type': 'application/json',
-                'User-Agent': 'FiCore-Backend/1.0'
-            }
-            
-            url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={full_network_id}'
-            print(f'📡 Calling Peyflex plans API: {url}')
-            
+            # Try Monnify first
             try:
-                response = requests.get(url, headers=headers, timeout=30)
-                print(f'📥 Peyflex plans response status: {response.status_code}')
-                print(f'📥 Response preview: {response.text[:500]}')
+                access_token = get_monnify_access_token()
                 
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        print(f'📊 Peyflex plans response type: {type(data)}')
-                        
-                        # Handle the correct response format from documentation
-                        plans_list = []
-                        if isinstance(data, dict):
-                            if 'plans' in data:
-                                plans_list = data['plans']
-                                print(f'✅ Found {len(plans_list)} plans in response.plans')
-                            elif 'data' in data:
-                                plans_list = data['data']
-                                print(f'✅ Found {len(plans_list)} plans in response.data')
-                            else:
-                                print(f'⚠️ Dict response without plans/data key: {list(data.keys())}')
-                                # Try to use the dict itself if it looks like a plan
-                                if 'plan_code' in data or 'amount' in data:
-                                    plans_list = [data]
-                                else:
-                                    plans_list = []
-                        elif isinstance(data, list):
-                            plans_list = data
-                            print(f'✅ Direct array with {len(plans_list)} plans')
-                        else:
-                            print(f'⚠️ Unexpected response format: {data}')
-                            plans_list = []
-                        
-                        # Transform to our format
-                        transformed_plans = []
-                        for plan in plans_list:
-                            if not isinstance(plan, dict):
-                                print(f'⚠️ Skipping non-dict plan: {plan}')
-                                continue
-                                
-                            transformed_plan = {
-                                'id': plan.get('plan_code', plan.get('id', '')),
-                                'name': plan.get('label', plan.get('name', plan.get('plan_name', 'Unknown Plan'))),
-                                'price': float(plan.get('amount', plan.get('price', 0))),
-                                'validity': plan.get('validity', plan.get('duration', 30)),  # Default 30 days
-                                'plan_code': plan.get('plan_code', plan.get('id', ''))
-                            }
-                            
-                            # Only add plans with valid data
-                            if transformed_plan['id'] and transformed_plan['price'] > 0:
-                                transformed_plans.append(transformed_plan)
-                            else:
-                                print(f'⚠️ Skipping invalid plan: {plan}')
-                        
-                        print(f'✅ Successfully transformed {len(transformed_plans)} valid plans')
-                        
-                        if len(transformed_plans) > 0:
-                            return jsonify({
-                                'success': True,
-                                'data': transformed_plans,
-                                'message': f'Data plans for {network.upper()}',
-                                'source': 'peyflex_api',
-                                'network_id': full_network_id
-                            }), 200
-                        else:
-                            print(f'⚠️ No valid plans found for {full_network_id}')
-                            # Fall through to fallback
-                            
-                    except Exception as json_error:
-                        print(f'❌ Error parsing Peyflex plans response: {json_error}')
-                        print(f'📄 Raw response: {response.text}')
-                        # Fall through to fallback
+                # Map network to Monnify biller code
+                network_mapping = {
+                    'mtn': 'MTN',
+                    'airtel': 'AIRTEL',
+                    'glo': 'GLO',
+                    '9mobile': '9MOBILE'
+                }
                 
-                elif response.status_code == 404:
-                    print(f'🚨 Network {full_network_id} not found on Peyflex (404)')
-                    # Fall through to fallback
+                monnify_network = network_mapping.get(network.lower())
+                if not monnify_network:
+                    raise Exception(f'Network {network} not supported by Monnify')
                 
-                elif response.status_code == 403:
-                    print(f'🚨 Peyflex plans API returned 403 Forbidden')
-                    print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
-                    # Fall through to fallback
+                # Get billers for DATA_BUNDLE category
+                billers_response = call_monnify_bills_api(
+                    f'billers?category_code=DATA_BUNDLE&size=100',
+                    'GET',
+                    access_token=access_token
+                )
                 
+                # Find the target biller
+                target_biller = None
+                for biller in billers_response['responseBody']['content']:
+                    if biller['name'].upper() == monnify_network:
+                        target_biller = biller
+                        break
+                
+                if not target_biller:
+                    raise Exception(f'Monnify biller not found for network: {network}')
+                
+                # Get data products for this biller
+                products_response = call_monnify_bills_api(
+                    f'biller-products?biller_code={target_biller["code"]}&size=200',
+                    'GET',
+                    access_token=access_token
+                )
+                
+                # Transform Monnify products to our format
+                plans = []
+                for product in products_response['responseBody']['content']:
+                    # Filter for data products
+                    if 'data' in product.get('name', '').lower() or 'gb' in product.get('name', '').lower() or 'mb' in product.get('name', '').lower():
+                        plan = {
+                            'id': product['code'],
+                            'name': product['name'],
+                            'price': product.get('price', 0),
+                            'plan_code': product['code'],
+                            'source': 'monnify',
+                            'priceType': product.get('priceType', 'FIXED'),
+                            'minAmount': product.get('minAmount'),
+                            'maxAmount': product.get('maxAmount')
+                        }
+                        
+                        # Extract data volume and duration from metadata if available
+                        metadata = product.get('metadata', {})
+                        if metadata:
+                            plan['volume'] = metadata.get('volume', 0)
+                            plan['duration'] = metadata.get('duration', 30)
+                            plan['durationUnit'] = metadata.get('durationUnit', 'MONTHLY')
+                        
+                        plans.append(plan)
+                
+                if plans:
+                    print(f'✅ Successfully retrieved {len(plans)} data plans from Monnify for {network}')
+                    return jsonify({
+                        'success': True,
+                        'data': plans,
+                        'message': f'Data plans for {network.upper()} from Monnify Bills API',
+                        'source': 'monnify_bills',
+                        'network': network
+                    }), 200
                 else:
-                    print(f'🚨 Peyflex plans API error: {response.status_code} - {response.text}')
-                    # Fall through to fallback
+                    raise Exception(f'No data plans found for {network} on Monnify')
+                
+            except Exception as monnify_error:
+                print(f'⚠️ Monnify data plans failed for {network}: {str(monnify_error)}')
+                
+                # Fallback to Peyflex
+                print(f'🔄 Falling back to Peyflex for {network} data plans')
+                
+                # Validate network ID format - Peyflex uses specific network identifiers
+                network_lower = network.lower().strip()
+                
+                # Known working networks based on Peyflex API discovery
+                known_networks = {
+                    'mtn': 'mtn_gifting_data',  # Map simple names to full IDs
+                    'mtn_gifting': 'mtn_gifting_data',
+                    'mtn_sme': 'mtn_sme_data',
+                    'airtel': 'airtel_data',
+                    'glo': 'glo_data',
+                    '9mobile': '9mobile_data'
+                }
+                
+                # Use full network ID if available
+                if network_lower in known_networks:
+                    full_network_id = known_networks[network_lower]
+                    print(f'📝 Mapped {network} to {full_network_id}')
+                else:
+                    full_network_id = network_lower
+                    print(f'📝 Using network ID as-is: {full_network_id}')
+                
+                headers = {
+                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'FiCore-Backend/1.0'
+                }
+                
+                url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={full_network_id}'
+                print(f'📡 Calling Peyflex plans API: {url}')
+                
+                try:
+                    response = requests.get(url, headers=headers, timeout=30)
+                    print(f'📥 Peyflex plans response status: {response.status_code}')
+                    print(f'📥 Response preview: {response.text[:500]}')
                     
-            except requests.exceptions.ConnectionError as e:
-                print(f'❌ Connection error to Peyflex: {str(e)}')
-                # Fall through to fallback
-            except requests.exceptions.Timeout as e:
-                print(f'❌ Timeout error to Peyflex: {str(e)}')
-                # Fall through to fallback
-            except Exception as e:
-                print(f'❌ Unexpected error calling Peyflex: {str(e)}')
-                # Fall through to fallback
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            print(f'📊 Peyflex plans response type: {type(data)}')
+                            
+                            # Handle the correct response format from documentation
+                            plans_list = []
+                            if isinstance(data, dict):
+                                if 'plans' in data:
+                                    plans_list = data['plans']
+                                    print(f'✅ Found {len(plans_list)} plans in response.plans')
+                                elif 'data' in data:
+                                    plans_list = data['data']
+                                    print(f'✅ Found {len(plans_list)} plans in response.data')
+                                else:
+                                    print(f'⚠️ Dict response without plans/data key: {list(data.keys())}')
+                                    # Try to use the dict itself if it looks like a plan
+                                    if 'plan_code' in data or 'amount' in data:
+                                        plans_list = [data]
+                                    else:
+                                        plans_list = []
+                            elif isinstance(data, list):
+                                plans_list = data
+                                print(f'✅ Direct array with {len(plans_list)} plans')
+                            else:
+                                print(f'⚠️ Unexpected response format: {data}')
+                                plans_list = []
+                            
+                            # Transform to our format
+                            transformed_plans = []
+                            for plan in plans_list:
+                                if not isinstance(plan, dict):
+                                    print(f'⚠️ Skipping non-dict plan: {plan}')
+                                    continue
+                                    
+                                transformed_plan = {
+                                    'id': plan.get('plan_code', plan.get('id', '')),
+                                    'name': plan.get('label', plan.get('name', plan.get('plan_name', 'Unknown Plan'))),
+                                    'price': float(plan.get('amount', plan.get('price', 0))),
+                                    'validity': plan.get('validity', plan.get('duration', 30)),  # Default 30 days
+                                    'plan_code': plan.get('plan_code', plan.get('id', '')),
+                                    'source': 'peyflex'
+                                }
+                                
+                                # Only add plans with valid data
+                                if transformed_plan['id'] and transformed_plan['price'] > 0:
+                                    transformed_plans.append(transformed_plan)
+                                else:
+                                    print(f'⚠️ Skipping invalid plan: {plan}')
+                            
+                            print(f'✅ Successfully transformed {len(transformed_plans)} valid plans from Peyflex')
+                            
+                            if len(transformed_plans) > 0:
+                                return jsonify({
+                                    'success': True,
+                                    'data': transformed_plans,
+                                    'message': f'Data plans for {network.upper()} from Peyflex (fallback)',
+                                    'source': 'peyflex_fallback',
+                                    'network_id': full_network_id
+                                }), 200
+                            else:
+                                print(f'⚠️ No valid plans found for {full_network_id}')
+                                # Fall through to emergency fallback
+                                
+                        except Exception as json_error:
+                            print(f'❌ Error parsing Peyflex plans response: {json_error}')
+                            print(f'📄 Raw response: {response.text}')
+                            # Fall through to emergency fallback
+                    
+                    elif response.status_code == 404:
+                        print(f'🚨 Network {full_network_id} not found on Peyflex (404)')
+                        # Fall through to emergency fallback
+                    
+                    elif response.status_code == 403:
+                        print(f'🚨 Peyflex plans API returned 403 Forbidden')
+                        print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
+                        # Fall through to emergency fallback
+                    
+                    else:
+                        print(f'🚨 Peyflex plans API error: {response.status_code} - {response.text}')
+                        # Fall through to emergency fallback
+                        
+                except requests.exceptions.ConnectionError as e:
+                    print(f'❌ Connection error to Peyflex: {str(e)}')
+                    # Fall through to emergency fallback
+                except requests.exceptions.Timeout as e:
+                    print(f'❌ Timeout error to Peyflex: {str(e)}')
+                    # Fall through to emergency fallback
+                except Exception as e:
+                    print(f'❌ Unexpected error calling Peyflex: {str(e)}')
+                    # Fall through to emergency fallback
             
         except Exception as e:
             print(f'❌ Error in get_data_plans: {str(e)}')
-            # Fall through to fallback
         
         # Return emergency fallback plans
-        print(f'🔄 Using fallback plans for {network}')
+        print(f'🔄 Using emergency fallback plans for {network}')
         emergency_plans = _get_fallback_data_plans(network)
         return jsonify({
                 'success': True,
                 'data': emergency_plans,
-                'message': f'Emergency data plans for {network.upper()} (Peyflex unavailable)',
-                'emergency': True,
-                'error': str(e)
+                'message': f'Emergency data plans for {network.upper()} (both providers unavailable)',
+                'emergency': True
             }), 200
-    
-    def get_data_plans(network):
-        """Get data plans for a specific network with comprehensive logging"""
-        try:
-            # 🔍 ENHANCED LOGGING: Environment check
-            print(f'🔧 Environment Check:')
-            print(f'   PEYFLEX_BASE_URL: {PEYFLEX_BASE_URL}')
-            print(f'   PEYFLEX_API_TOKEN: {"SET" if PEYFLEX_API_TOKEN else "NOT SET"}')
-            if PEYFLEX_API_TOKEN:
-                print(f'   Token Length: {len(PEYFLEX_API_TOKEN)} chars')
-                print(f'   Token Preview: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
-            
-            # Network should be full ID like 'mtn_sme_data', not just 'mtn'
-            url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={network.lower()}'
-            print(f'🔍 Fetching data plans from: {url}')
-            
-            # 🔍 ENHANCED LOGGING: Request details
-            headers = {}
-            if PEYFLEX_API_TOKEN:
-                headers['Authorization'] = f'Token {PEYFLEX_API_TOKEN}'
-            
-            headers.update({
-                'User-Agent': 'FiCore-Backend/1.0 (Nigeria; Python-Requests)',
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
-            })
-            
-            print(f'📤 Request Headers: {dict(headers)}')
-            
-            response = requests.get(url, headers=headers, timeout=15)
-            
-            print(f'📡 Peyflex response status: {response.status_code}')
-            print(f'📡 Peyflex response headers: {dict(response.headers)}')
-            print(f'📡 Peyflex response body: {response.text[:1000]}')
-            
-            # 🔍 ENHANCED LOGGING: Detailed error analysis
-            if response.status_code == 403:
-                print(f'🚨 403 FORBIDDEN ERROR ANALYSIS:')
-                print(f'   - This suggests authentication/authorization issues')
-                print(f'   - API token may be invalid, expired, or not whitelisted')
-                print(f'   - Server IP may not be authorized')
-                print(f'   - Check if Peyflex requires registration/approval')
-                
-            elif response.status_code == 404:
-                print(f'🚨 404 NOT FOUND ERROR:')
-                print(f'   - API endpoint may have changed')
-                print(f'   - Network parameter may be invalid: {network}')
-                
-            elif response.status_code == 429:
-                print(f'🚨 429 RATE LIMIT ERROR:')
-                print(f'   - Too many requests to Peyflex API')
-                print(f'   - Need to implement rate limiting')
-            
-            if response.status_code == 200:
-                try:
-                    plans_data = response.json()
-                    print(f'✅ Successfully parsed JSON response')
-                    print(f'📊 Response type: {type(plans_data)}')
-                    
-                    if isinstance(plans_data, list):
-                        print(f'📊 Plans array length: {len(plans_data)}')
-                        if len(plans_data) == 0:
-                            print(f'⚠️ Peyflex returned empty array for {network}')
-                            print(f'⚠️ Using Dynamic Pricing Engine fallback')
-                            plans_data = _get_fallback_data_plans(network)
-                    elif isinstance(plans_data, dict):
-                        print(f'📊 Response keys: {list(plans_data.keys())}')
-                        # Handle different response formats
-                        if 'data' in plans_data:
-                            plans_data = plans_data['data']
-                        elif 'plans' in plans_data:
-                            plans_data = plans_data['plans']
-                    
-                    # Transform plan structure to ensure consistency
-                    transformed_plans = []
-                    for plan in plans_data:
-                        if isinstance(plan, dict):
-                            transformed_plan = {
-                                'id': plan.get('plan_code', plan.get('id', '')),
-                                'name': plan.get('name', plan.get('plan_name', '')),
-                                'price': plan.get('price', plan.get('amount', 0)),
-                                'validity': plan.get('validity', plan.get('validity_days', 30)),
-                                'plan_code': plan.get('plan_code', plan.get('id', '')),
-                            }
-                            transformed_plans.append(transformed_plan)
-                    
-                    print(f'✅ Returning {len(transformed_plans)} data plans for {network}')
-                    
-                    return jsonify({
-                        'success': True,
-                        'data': transformed_plans,
-                        'message': 'Data plans retrieved successfully from Peyflex API'
-                    }), 200
-                    
-                except json.JSONDecodeError as e:
-                    print(f'❌ JSON decode error: {str(e)}')
-                    print(f'📄 Raw response: {response.text}')
-                    print(f'⚠️ Using Dynamic Pricing Engine fallback')
-                    fallback_plans = _get_fallback_data_plans(network)
-                    return jsonify({
-                        'success': True,
-                        'data': fallback_plans,
-                        'message': 'Using Dynamic Pricing Engine fallback (JSON decode error)'
-                    }), 200
-            else:
-                print(f'❌ Peyflex returned error: {response.status_code} - {response.text}')
-                print(f'⚠️ Using Dynamic Pricing Engine fallback')
-                fallback_plans = _get_fallback_data_plans(network)
-                return jsonify({
-                    'success': True,
-                    'data': fallback_plans,
-                    'message': f'Using Dynamic Pricing Engine fallback (HTTP {response.status_code})'
-                }), 200
-        except Exception as e:
-            print(f'❌ Error getting data plans: {str(e)}')
-            import traceback
-            traceback.print_exc()
-            print(f'⚠️ Using fallback data plans')
-            fallback_plans = _get_fallback_data_plans(network)
-            return jsonify({
-                'success': True,
-                'data': fallback_plans,
-                'message': 'Using fallback data plans'
-            }), 200
-    
-    def _get_fallback_data_plans(network):
-        """
-        Return fallback data plans using the Dynamic Pricing Engine
-        CRITICAL: Uses formula-based pricing instead of hardcoded prices
-        """
-        try:
-            # Import the dynamic pricing engine
-            from utils.dynamic_pricing_engine import get_pricing_engine
-            
-            # Get pricing engine instance
-            pricing_engine = get_pricing_engine(mongo)
-            
-            # Get cached rates from pricing engine (includes emergency fallback logic)
-            rates = pricing_engine.get_peyflex_rates('data', network)
-            
-            # Convert pricing engine format to our API format
-            fallback_plans = []
-            
-            for plan_id, plan_data in rates.items():
-                # Skip if plan_data is not a dict (handles edge cases)
-                if not isinstance(plan_data, dict):
-                    continue
-                    
-                fallback_plans.append({
-                    'id': plan_id,
-                    'name': plan_data.get('name', f'{plan_id} Data Plan'),
-                    'price': plan_data.get('price', 0),
-                    'validity': plan_data.get('validity', 30),
-                    'plan_code': plan_id
-                })
-            
-            # If we got plans from the engine, return them
-            if fallback_plans:
-                print(f'✅ Using Dynamic Pricing Engine fallback for {network}: {len(fallback_plans)} plans')
-                return fallback_plans
-            
-            # If pricing engine also failed, use minimal emergency plans
-            print(f'⚠️ Dynamic Pricing Engine also failed, using minimal emergency plans for {network}')
-            return _get_minimal_emergency_plans(network)
-            
-        except Exception as e:
-            print(f'❌ Error using Dynamic Pricing Engine: {str(e)}')
-            print(f'⚠️ Falling back to minimal emergency plans for {network}')
-            return _get_minimal_emergency_plans(network)
 
-    def _get_minimal_emergency_plans(network):
-        """
-        Minimal emergency plans with intentionally HIGH prices to prevent losses
-        Only used when both Peyflex API and Dynamic Pricing Engine fail
-        """
+    def _get_fallback_data_plans(network):
+        """Get emergency fallback data plans when all providers fail"""
+        network_upper = network.upper()
         network_lower = network.lower()
-        
-        # High-priced emergency plans to prevent losses during total system failure
-        if 'mtn' in network_lower:
-            return [
-                {'id': 'EMERGENCY_MTN_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 800, 'validity': 30, 'plan_code': 'EMERGENCY_MTN_1GB'},
-                {'id': 'EMERGENCY_MTN_2GB', 'name': '2GB - 30 Days (Emergency)', 'price': 1500, 'validity': 30, 'plan_code': 'EMERGENCY_MTN_2GB'},
-            ]
-        elif 'airtel' in network_lower:
-            return [
-                {'id': 'EMERGENCY_AIRTEL_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 900, 'validity': 30, 'plan_code': 'EMERGENCY_AIRTEL_1GB'},
-                {'id': 'EMERGENCY_AIRTEL_2GB', 'name': '2GB - 30 Days (Emergency)', 'price': 1600, 'validity': 30, 'plan_code': 'EMERGENCY_AIRTEL_2GB'},
-            ]
-        elif 'glo' in network_lower:
-            return [
-                {'id': 'EMERGENCY_GLO_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 850, 'validity': 30, 'plan_code': 'EMERGENCY_GLO_1GB'},
-                {'id': 'EMERGENCY_GLO_2GB', 'name': '2GB - 30 Days (Emergency)', 'price': 1550, 'validity': 30, 'plan_code': 'EMERGENCY_GLO_2GB'},
-            ]
-        elif '9mobile' in network_lower:
-            return [
-                {'id': 'EMERGENCY_9MOB_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 850, 'validity': 30, 'plan_code': 'EMERGENCY_9MOB_1GB'},
-                {'id': 'EMERGENCY_9MOB_2GB', 'name': '2GB - 30 Days (Emergency)', 'price': 1550, 'validity': 30, 'plan_code': 'EMERGENCY_9MOB_2GB'},
-            ]
-        
-        # Default emergency fallback
         return [
-            {'id': 'EMERGENCY_DEFAULT_1GB', 'name': '1GB - 30 Days (Emergency)', 'price': 1000, 'validity': 30, 'plan_code': 'EMERGENCY_DEFAULT_1GB'},
+            {
+                'id': f'{network_lower}_1gb',
+                'name': f'{network_upper} 1GB - 30 Days',
+                'price': 500,
+                'validity': 30,
+                'plan_code': f'{network_lower}_1gb',
+                'source': 'emergency_fallback'
+            },
+            {
+                'id': f'{network_lower}_2gb', 
+                'name': f'{network_upper} 2GB - 30 Days',
+                'price': 1000,
+                'validity': 30,
+                'plan_code': f'{network_lower}_2gb',
+                'source': 'emergency_fallback'
+            }
         ]
+    
+    # ==================== TRANSACTION ENDPOINTS ====================
     
     @vas_bp.route('/transactions/all', methods=['GET'])
     @token_required
@@ -3627,6 +4033,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'amountPaid': txn.get('amount', 0),
                     'fee': 0,
                     'description': txn.get('description', 'Income'),
+                    'source': txn.get('source', 'Unknown'),  # CRITICAL FIX: Add missing source field
                     'reference': '',
                     'status': 'SUCCESS',
                     'provider': '',
@@ -3649,6 +4056,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'amountPaid': txn.get('amount', 0),
                     'fee': 0,
                     'description': txn.get('description', 'Expense'),
+                    'title': txn.get('title', 'Expense'),  # CRITICAL FIX: Add missing title field
                     'reference': '',
                     'status': 'SUCCESS',
                     'provider': '',
@@ -4166,5 +4574,535 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'message': 'Failed to retrieve transaction receipt',
                 'errors': {'general': [str(e)]}
             }), 500
+
+    # ==================== BILLS PAYMENT ENDPOINTS ====================
+    
+    @vas_bp.route('/bills/categories', methods=['GET'])
+    @token_required
+    def get_bill_categories(current_user):
+        """Get available bill categories from Monnify Bills API"""
+        try:
+            print('🔍 Fetching bill categories from Monnify Bills API')
+            
+            access_token = get_monnify_access_token()
+            response = call_monnify_bills_api(
+                'biller-categories?size=50',
+                'GET',
+                access_token=access_token
+            )
+            
+            print(f'📡 Monnify bill categories response: {response}')
+            
+            categories = []
+            for category in response['responseBody']['content']:
+                # Filter out categories we already handle (AIRTIME, DATA_BUNDLE)
+                if category['code'] not in ['AIRTIME', 'DATA_BUNDLE']:
+                    categories.append({
+                        'id': category['code'].lower(),
+                        'name': category['name'],
+                        'code': category['code'],
+                        'available': True,
+                        'description': f"Pay {category['name'].lower().replace('_', ' ')} bills"
+                    })
+            
+            print(f'✅ Processed {len(categories)} bill categories')
+            
+            return jsonify({
+                'success': True,
+                'data': categories,
+                'message': 'Bill categories retrieved successfully',
+                'source': 'monnify_bills'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error getting bill categories: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': f'Failed to get bill categories: {str(e)}',
+                'errors': {'general': [str(e)]}
+            }), 500
+
+    @vas_bp.route('/bills/providers/<category>', methods=['GET'])
+    @token_required
+    def get_bill_providers(current_user, category):
+        """Get bill providers for a specific category"""
+        try:
+            print(f'🔍 Fetching bill providers for category: {category}')
+            
+            # Map frontend category to Monnify category
+            category_mapping = {
+                'electricity': 'ELECTRICITY',
+                'cable_tv': 'CABLE_TV',
+                'water': 'WATER',
+                'internet': 'INTERNET',
+                'transportation': 'TRANSPORTATION'
+            }
+            
+            monnify_category = category_mapping.get(category.lower())
+            if not monnify_category:
+                print(f'❌ Unsupported category: {category}')
+                return jsonify({
+                    'success': False,
+                    'message': f'Unsupported category: {category}',
+                    'errors': {'category': [f'Category {category} is not supported']}
+                }), 400
+            
+            access_token = get_monnify_access_token()
+            response = call_monnify_bills_api(
+                f'billers?category_code={monnify_category}&size=100',
+                'GET',
+                access_token=access_token
+            )
+            
+            print(f'📡 Monnify providers response for {monnify_category}: {response}')
+            
+            providers = []
+            for biller in response['responseBody']['content']:
+                providers.append({
+                    'id': biller['code'],
+                    'name': biller['name'],
+                    'code': biller['code'],
+                    'category': category,
+                    'description': f"{biller['name']} - {category.replace('_', ' ').title()} provider"
+                })
+            
+            print(f'✅ Processed {len(providers)} providers for {category}')
+            
+            return jsonify({
+                'success': True,
+                'data': providers,
+                'message': f'Providers for {category} retrieved successfully',
+                'source': 'monnify_bills',
+                'category': category,
+                'monnify_category': monnify_category
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error getting providers for {category}: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': f'Failed to get providers for {category}: {str(e)}',
+                'errors': {'general': [str(e)]}
+            }), 500
+
+    @vas_bp.route('/bills/products/<provider>', methods=['GET'])
+    @token_required
+    def get_bill_products(current_user, provider):
+        """Get products/packages for a specific provider"""
+        try:
+            print(f'🔍 Fetching bill products for provider: {provider}')
+            
+            access_token = get_monnify_access_token()
+            response = call_monnify_bills_api(
+                f'biller-products?biller_code={provider}&size=100',
+                'GET',
+                access_token=access_token
+            )
+            
+            print(f'📡 Monnify products response for {provider}: {response}')
+            
+            products = []
+            for product in response['responseBody']['content']:
+                # Extract metadata for better product information
+                metadata = product.get('metadata', {})
+                duration = metadata.get('duration', 1)
+                duration_unit = metadata.get('durationUnit', 'MONTHLY')
+                product_type = metadata.get('productType', {})
+                
+                # Format duration display
+                duration_display = f"{duration} {duration_unit.lower()}" if duration_unit else "One-time"
+                
+                products.append({
+                    'id': product['code'],
+                    'name': product['name'],
+                    'code': product['code'],
+                    'price': product.get('price'),
+                    'priceType': product.get('priceType', 'OPEN'),
+                    'minAmount': product.get('minAmount'),
+                    'maxAmount': product.get('maxAmount'),
+                    'duration': duration_display,
+                    'productType': product_type.get('name', 'Service'),
+                    'description': f"{product['name']} - {duration_display}",
+                    'metadata': metadata
+                })
+            
+            print(f'✅ Processed {len(products)} products for {provider}')
+            
+            return jsonify({
+                'success': True,
+                'data': products,
+                'message': f'Products for {provider} retrieved successfully',
+                'source': 'monnify_bills',
+                'provider': provider
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Error getting products for {provider}: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': f'Failed to get products for {provider}: {str(e)}',
+                'errors': {'general': [str(e)]}
+            }), 500
+
+    @vas_bp.route('/bills/validate', methods=['POST'])
+    @token_required
+    def validate_bill_account(current_user):
+        """Validate customer account for bill payment"""
+        try:
+            data = request.get_json()
+            
+            # Extract required fields
+            product_code = data.get('productCode')
+            customer_id = data.get('customerId')
+            
+            print(f'🔍 Validating bill account - Product: {product_code}, Customer: {customer_id}')
+            
+            # Validate required fields
+            if not product_code or not customer_id:
+                print('❌ Missing required fields for validation')
+                return jsonify({
+                    'success': False,
+                    'message': 'Product code and customer ID are required',
+                    'errors': {
+                        'productCode': ['Product code is required'] if not product_code else [],
+                        'customerId': ['Customer ID is required'] if not customer_id else []
+                    }
+                }), 400
+            
+            access_token = get_monnify_access_token()
+            response = call_monnify_bills_api(
+                'validate-customer',
+                'POST',
+                {
+                    'productCode': product_code,
+                    'customerId': customer_id
+                },
+                access_token=access_token
+            )
+            
+            print(f'📡 Monnify validation response: {response}')
+            
+            validation_data = response['responseBody']
+            vend_instruction = validation_data.get('vendInstruction', {})
+            
+            result = {
+                'customerName': validation_data.get('customerName', ''),
+                'priceType': validation_data.get('priceType', 'OPEN'),
+                'requireValidationRef': vend_instruction.get('requireValidationRef', False),
+                'validationReference': validation_data.get('validationReference'),
+                'productCode': product_code,
+                'customerId': customer_id
+            }
+            
+            print(f'✅ Account validation successful for {customer_id}')
+            
+            return jsonify({
+                'success': True,
+                'data': result,
+                'message': 'Account validated successfully',
+                'source': 'monnify_bills'
+            }), 200
+            
+        except Exception as e:
+            print(f'❌ Account validation failed: {str(e)}')
+            
+            # Handle specific validation errors
+            error_message = str(e)
+            if 'invalid customer' in error_message.lower():
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid customer ID. Please check the account number and try again.',
+                    'errors': {'customerId': ['Invalid customer ID']},
+                    'user_message': {
+                        'title': 'Invalid Account',
+                        'message': 'The account number you entered is not valid. Please check and try again.',
+                        'type': 'validation_error'
+                    }
+                }), 400
+            elif 'product not found' in error_message.lower():
+                return jsonify({
+                    'success': False,
+                    'message': 'Product not found. Please select a valid product.',
+                    'errors': {'productCode': ['Product not found']},
+                    'user_message': {
+                        'title': 'Product Not Found',
+                        'message': 'The selected product is not available. Please choose another option.',
+                        'type': 'validation_error'
+                    }
+                }), 400
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'Validation failed: {error_message}',
+                    'errors': {'general': [error_message]},
+                    'user_message': {
+                        'title': 'Validation Failed',
+                        'message': 'Unable to validate the account. Please try again later.',
+                        'type': 'service_error'
+                    }
+                }), 400
+
+    @vas_bp.route('/bills/buy', methods=['POST'])
+    @token_required
+    def buy_bill(current_user):
+        """Purchase bill payment using Monnify Bills API"""
+        try:
+            data = request.get_json()
+            
+            # Extract required fields
+            category = data.get('category')
+            provider = data.get('provider')
+            account_number = data.get('accountNumber')
+            customer_name = data.get('customerName', '')
+            amount = float(data.get('amount', 0))
+            product_code = data.get('productCode')
+            product_name = data.get('productName', '')
+            validation_reference = data.get('validationReference')
+            
+            print(f'🔍 Processing bill purchase:')
+            print(f'   Category: {category}')
+            print(f'   Provider: {provider}')
+            print(f'   Account: {account_number}')
+            print(f'   Amount: ₦{amount:,.2f}')
+            print(f'   Product: {product_code}')
+            
+            # Validate required fields
+            required_fields = ['category', 'provider', 'accountNumber', 'amount', 'productCode']
+            missing_fields = []
+            for field in required_fields:
+                if not data.get(field):
+                    missing_fields.append(field)
+            
+            if missing_fields:
+                print(f'❌ Missing required fields: {missing_fields}')
+                return jsonify({
+                    'success': False,
+                    'message': 'Missing required fields',
+                    'errors': {field: [f'{field} is required'] for field in missing_fields}
+                }), 400
+            
+            # Validate amount
+            if amount <= 0:
+                print(f'❌ Invalid amount: {amount}')
+                return jsonify({
+                    'success': False,
+                    'message': 'Amount must be greater than zero',
+                    'errors': {'amount': ['Amount must be greater than zero']}
+                }), 400
+            
+            # Check wallet balance
+            wallet = mongo.db.vas_wallets.find_one({'userId': current_user['_id']})
+            if not wallet:
+                print('❌ Wallet not found')
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet not found. Please create a wallet first.',
+                    'errors': {'wallet': ['Wallet not found']}
+                }), 404
+            
+            if wallet['balance'] < amount:
+                print(f'❌ Insufficient balance: ₦{wallet["balance"]:,.2f} < ₦{amount:,.2f}')
+                return jsonify({
+                    'success': False,
+                    'message': 'Insufficient wallet balance',
+                    'errors': {'balance': ['Insufficient wallet balance']},
+                    'user_message': {
+                        'title': 'Insufficient Balance',
+                        'message': f'You need ₦{amount:,.2f} but only have ₦{wallet["balance"]:,.2f} in your wallet.',
+                        'type': 'insufficient_balance'
+                    }
+                }), 402
+            
+            # Generate unique transaction reference
+            transaction_ref = f"BILL_{uuid.uuid4().hex[:12].upper()}"
+            print(f'📝 Generated transaction reference: {transaction_ref}')
+            
+            # Call Monnify Bills API
+            access_token = get_monnify_access_token()
+            
+            vend_data = {
+                'productCode': product_code,
+                'customerId': account_number,
+                'amount': amount,
+                'emailAddress': current_user.get('email', ''),
+                'phoneNumber': current_user.get('phoneNumber', ''),
+                'reference': transaction_ref
+            }
+            
+            # Add validation reference if required
+            if validation_reference:
+                vend_data['validationReference'] = validation_reference
+                print(f'📝 Using validation reference: {validation_reference}')
+            
+            print(f'📡 Calling Monnify vend API with data: {vend_data}')
+            
+            response = call_monnify_bills_api(
+                'vend',
+                'POST',
+                vend_data,
+                access_token=access_token
+            )
+            
+            print(f'📡 Monnify vend response: {response}')
+            
+            vend_result = response['responseBody']
+            
+            # Handle IN_PROGRESS status with requery
+            if vend_result.get('vendStatus') == 'IN_PROGRESS':
+                print('⏳ Transaction in progress, waiting 3 seconds before requery...')
+                import time
+                time.sleep(3)
+                
+                requery_response = call_monnify_bills_api(
+                    f'requery?reference={transaction_ref}',
+                    'GET',
+                    access_token=access_token
+                )
+                
+                print(f'📡 Monnify requery response: {requery_response}')
+                vend_result = requery_response['responseBody']
+            
+            # Determine final status
+            final_status = vend_result.get('vendStatus', 'PENDING')
+            print(f'📊 Final transaction status: {final_status}')
+            
+            # Create transaction record
+            transaction = {
+                'userId': current_user['_id'],
+                'type': 'BILL',
+                'subtype': category.upper(),
+                'billCategory': category,
+                'billProvider': provider,
+                'accountNumber': account_number,
+                'customerName': customer_name,
+                'amount': amount,
+                'status': final_status,
+                'transactionReference': vend_result.get('transactionReference'),
+                'vendReference': vend_result.get('vendReference'),
+                'description': f"Bill payment: {provider} - {account_number}",
+                'provider': 'monnify',
+                'createdAt': datetime.utcnow(),
+                'productCode': product_code,
+                'productName': vend_result.get('productName', product_name),
+                'billerCode': vend_result.get('billerCode'),
+                'billerName': vend_result.get('billerName'),
+                'commission': vend_result.get('commission', 0),
+                'payableAmount': vend_result.get('payableAmount', amount),
+                'vendAmount': vend_result.get('vendAmount', amount)
+            }
+            
+            # Insert transaction
+            result = mongo.db.vas_transactions.insert_one(transaction)
+            transaction['_id'] = result.inserted_id
+            
+            print(f'💾 Transaction saved with ID: {transaction["_id"]}')
+            
+            # Update wallet balance if successful
+            if final_status == 'SUCCESS':
+                print(f'✅ Transaction successful, deducting ₦{amount:,.2f} from wallet')
+                mongo.db.vas_wallets.update_one(
+                    {'userId': current_user['_id']},
+                    {
+                        '$inc': {'balance': -amount},
+                        '$set': {'lastUpdated': datetime.utcnow()}
+                    }
+                )
+                
+                # Create success notification
+                try:
+                    create_user_notification(
+                        mongo,
+                        current_user['_id'],
+                        'Bill Payment Successful',
+                        f'Your {provider} bill payment of ₦{amount:,.2f} was successful.',
+                        'success',
+                        {
+                            'type': 'bill_payment',
+                            'category': category,
+                            'provider': provider,
+                            'amount': amount,
+                            'transactionId': str(transaction['_id'])
+                        }
+                    )
+                except Exception as e:
+                    print(f'⚠️ Failed to create notification: {str(e)}')
+                
+                print(f'🎉 Bill payment completed successfully!')
+                
+                return jsonify({
+                    'success': True,
+                    'data': serialize_doc(transaction),
+                    'message': 'Bill payment processed successfully',
+                    'user_message': {
+                        'title': 'Payment Successful',
+                        'message': f'Your {provider} bill payment of ₦{amount:,.2f} was successful.',
+                        'type': 'success'
+                    }
+                }), 200
+                
+            elif final_status == 'FAILED':
+                print(f'❌ Transaction failed')
+                return jsonify({
+                    'success': False,
+                    'data': serialize_doc(transaction),
+                    'message': 'Bill payment failed',
+                    'user_message': {
+                        'title': 'Payment Failed',
+                        'message': f'Your {provider} bill payment could not be completed. Your wallet was not charged.',
+                        'type': 'transaction_failed'
+                    }
+                }), 400
+                
+            else:  # PENDING or other status
+                print(f'⏳ Transaction pending with status: {final_status}')
+                return jsonify({
+                    'success': True,
+                    'data': serialize_doc(transaction),
+                    'message': 'Bill payment is being processed',
+                    'user_message': {
+                        'title': 'Payment Processing',
+                        'message': f'Your {provider} bill payment is being processed. You will be notified once completed.',
+                        'type': 'pending'
+                    }
+                }), 200
+            
+        except Exception as e:
+            print(f'❌ Bill payment failed with error: {str(e)}')
+            
+            # Handle specific errors
+            error_message = str(e)
+            if 'insufficient balance' in error_message.lower():
+                return jsonify({
+                    'success': False,
+                    'message': 'Insufficient wallet balance',
+                    'errors': {'balance': ['Insufficient wallet balance']},
+                    'user_message': {
+                        'title': 'Insufficient Balance',
+                        'message': 'You don\'t have enough funds in your wallet to complete this transaction.',
+                        'type': 'insufficient_balance'
+                    }
+                }), 402
+            elif 'timeout' in error_message.lower():
+                return jsonify({
+                    'success': False,
+                    'message': 'Transaction timeout',
+                    'errors': {'timeout': ['Transaction timed out']},
+                    'user_message': {
+                        'title': 'Transaction Timeout',
+                        'message': 'The transaction is taking longer than expected. Please try again.',
+                        'type': 'timeout'
+                    }
+                }), 408
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'Bill payment failed: {error_message}',
+                    'errors': {'general': [error_message]},
+                    'user_message': {
+                        'title': 'Payment Failed',
+                        'message': 'Unable to process your bill payment. Please try again later.',
+                        'type': 'service_error'
+                    }
+                }), 500
 
     return vas_bp
