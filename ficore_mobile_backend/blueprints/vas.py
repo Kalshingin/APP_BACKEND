@@ -4095,6 +4095,11 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 # Get proper description and category
                 description, category = get_transaction_display_info(txn)
                 
+                # CRITICAL FIX: Ensure createdAt is always a valid datetime
+                created_at = txn.get('createdAt')
+                if not isinstance(created_at, datetime):
+                    created_at = datetime.utcnow()
+                
                 all_transactions.append({
                     '_id': str(txn['_id']),
                     'type': 'VAS',
@@ -4106,8 +4111,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'reference': txn.get('reference', ''),
                     'status': txn.get('status', 'UNKNOWN'),
                     'provider': txn.get('provider', ''),
-                    'createdAt': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
-                    'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                    'createdAt': created_at.isoformat() + 'Z',
+                    'date': created_at.isoformat() + 'Z',
                     'category': category,
                     'billCategory': txn.get('billCategory', ''),
                     'billProvider': txn.get('billProvider', ''),
@@ -4125,6 +4130,11 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             )
             
             for txn in income_transactions:
+                # CRITICAL FIX: Ensure createdAt is always a valid datetime
+                created_at = txn.get('createdAt')
+                if not isinstance(created_at, datetime):
+                    created_at = datetime.utcnow()
+                
                 all_transactions.append({
                     '_id': str(txn['_id']),
                     'type': 'INCOME',
@@ -4138,8 +4148,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'reference': '',
                     'status': 'SUCCESS',
                     'provider': '',
-                    'createdAt': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
-                    'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                    'createdAt': created_at.isoformat() + 'Z',
+                    'date': created_at.isoformat() + 'Z',
                     'category': txn.get('category', 'Income')
                 })
             
@@ -4150,6 +4160,11 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             )
             
             for txn in expense_transactions:
+                # CRITICAL FIX: Ensure createdAt is always a valid datetime
+                created_at = txn.get('createdAt')
+                if not isinstance(created_at, datetime):
+                    created_at = datetime.utcnow()
+                
                 all_transactions.append({
                     '_id': str(txn['_id']),
                     'type': 'EXPENSE',
@@ -4162,12 +4177,14 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'reference': '',
                     'status': 'SUCCESS',
                     'provider': '',
-                    'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                    'createdAt': created_at.isoformat() + 'Z',
+                    'date': created_at.isoformat() + 'Z',
                     'category': txn.get('category', 'Expense')
                 })
             
-            # Sort all transactions by date (newest first)
-            all_transactions.sort(key=lambda x: x['date'], reverse=True)
+            # CRITICAL FIX: Sort all transactions by date (newest first) after merging
+            # This ensures proper chronological order across all transaction types
+            all_transactions.sort(key=lambda x: x['createdAt'], reverse=True)
             
             # Apply pagination
             paginated_transactions = all_transactions[skip:skip + limit]
