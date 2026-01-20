@@ -114,6 +114,17 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             print(f'❌ Monnify Bills API call failed: {str(e)}')
             raise Exception(f'Monnify Bills API failed: {str(e)}')
     
+    def generate_retention_description(base_description, savings_message, discount_applied):
+        """Generate retention-focused transaction description"""
+        try:
+            if discount_applied > 0:
+                return f"{base_description} (Saved ₦{discount_applied:.0f})"
+            else:
+                return base_description
+        except Exception as e:
+            print(f'⚠️ Error generating retention description: {str(e)}')
+            return base_description  # Fallback to base description
+    
     # ==================== DIAGNOSTIC ENDPOINTS ====================
     
     @vas_bp.route('/diagnostic/peyflex-connection', methods=['GET'])
@@ -3982,6 +3993,84 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }
         ]
     
+    def get_transaction_display_info(txn):
+        """Generate user-friendly description and category for VAS transactions"""
+        txn_type = txn.get('type', 'UNKNOWN').upper()
+        bill_category = txn.get('billCategory', '').lower()
+        provider = txn.get('provider', '')
+        bill_provider = txn.get('billProvider', '')
+        amount = txn.get('amount', 0)
+        phone_number = txn.get('phoneNumber', '')
+        plan_name = txn.get('planName', '')
+        account_number = txn.get('accountNumber', '')
+        
+        # Generate description and category based on transaction type
+        if txn_type == 'AIRTIME_PURCHASE':
+            description = f"Airtime purchase ₦{amount:,.2f}"
+            if phone_number:
+                masked_phone = phone_number[-4:] + '****' if len(phone_number) > 4 else phone_number
+                description = f"Airtime ₦{amount:,.2f} sent to {masked_phone}"
+            category = "Utilities"
+            
+        elif txn_type == 'DATA_PURCHASE':
+            description = f"Data purchase ₦{amount:,.2f}"
+            if plan_name and phone_number:
+                masked_phone = phone_number[-4:] + '****' if len(phone_number) > 4 else phone_number
+                description = f"{plan_name} for {masked_phone}"
+            elif phone_number:
+                masked_phone = phone_number[-4:] + '****' if len(phone_number) > 4 else phone_number
+                description = f"Data ₦{amount:,.2f} for {masked_phone}"
+            category = "Utilities"
+            
+        elif txn_type == 'WALLET_FUNDING':
+            description = f"Wallet funded ₦{amount:,.2f}"
+            category = "Transfer"
+            
+        elif txn_type == 'BILL':
+            # Handle bill payments based on category
+            if bill_category == 'electricity':
+                description = f"Electricity bill ₦{amount:,.2f}"
+                if bill_provider:
+                    description = f"Electricity bill ₦{amount:,.2f} - {bill_provider}"
+                category = "Utilities"
+                
+            elif bill_category == 'cable_tv':
+                description = f"Cable TV subscription ₦{amount:,.2f}"
+                if bill_provider:
+                    description = f"Cable TV ₦{amount:,.2f} - {bill_provider}"
+                category = "Entertainment"
+                
+            elif bill_category == 'internet':
+                description = f"Internet subscription ₦{amount:,.2f}"
+                if bill_provider:
+                    description = f"Internet ₦{amount:,.2f} - {bill_provider}"
+                category = "Utilities"
+                
+            elif bill_category == 'transportation':
+                description = f"Transportation payment ₦{amount:,.2f}"
+                if bill_provider:
+                    description = f"Transportation ₦{amount:,.2f} - {bill_provider}"
+                category = "Transportation"
+                
+            else:
+                description = f"Bill payment ₦{amount:,.2f}"
+                if bill_provider:
+                    description = f"Bill payment ₦{amount:,.2f} - {bill_provider}"
+                category = "Utilities"
+                
+        elif txn_type in ['BVN_VERIFICATION', 'NIN_VERIFICATION']:
+            verification_type = 'BVN' if txn_type == 'BVN_VERIFICATION' else 'NIN'
+            description = f"{verification_type} verification ₦{amount:,.2f}"
+            category = "Services"
+            
+        else:
+            # Fallback for unknown types
+            clean_type = txn_type.replace('_', ' ').title()
+            description = f"{clean_type} ₦{amount:,.2f}"
+            category = "Services"
+            
+        return description, category
+
     # ==================== TRANSACTION ENDPOINTS ====================
     
     @vas_bp.route('/transactions/all', methods=['GET'])
@@ -4003,6 +4092,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             )
             
             for txn in vas_transactions:
+                # Get proper description and category
+                description, category = get_transaction_display_info(txn)
+                
                 all_transactions.append({
                     '_id': str(txn['_id']),
                     'type': 'VAS',
@@ -4010,12 +4102,20 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'amount': txn.get('amount', 0),
                     'amountPaid': txn.get('amountPaid', 0),
                     'fee': txn.get('depositFee', 0),
-                    'description': f"VAS {txn.get('type', 'Transaction')}",
+                    'description': description,
                     'reference': txn.get('reference', ''),
                     'status': txn.get('status', 'UNKNOWN'),
                     'provider': txn.get('provider', ''),
+                    'createdAt': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
                     'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
-                    'category': 'VAS Services'
+                    'category': category,
+                    'billCategory': txn.get('billCategory', ''),
+                    'billProvider': txn.get('billProvider', ''),
+                    'metadata': {
+                        'phoneNumber': txn.get('phoneNumber', ''),
+                        'planName': txn.get('planName', ''),
+                        'accountNumber': txn.get('accountNumber', ''),
+                    }
                 })
             
             # 2. Get Income transactions
@@ -4032,11 +4132,13 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'amount': txn.get('amount', 0),
                     'amountPaid': txn.get('amount', 0),
                     'fee': 0,
-                    'description': txn.get('description', 'Income'),
-                    'source': txn.get('source', 'Unknown'),  # CRITICAL FIX: Add missing source field
+                    'description': txn.get('description', 'Income received'),
+                    'title': txn.get('source', 'Income'),
+                    'source': txn.get('source', 'Unknown'),
                     'reference': '',
                     'status': 'SUCCESS',
                     'provider': '',
+                    'createdAt': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
                     'date': txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
                     'category': txn.get('category', 'Income')
                 })
@@ -4231,7 +4333,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     @token_required
     def get_reserved_accounts(current_user):
         """Get user's reserved accounts (alias for backward compatibility)"""
-        return get_reserved_account(current_user)
+        # Call the actual function directly since current_user is already passed by @token_required
+        return get_reserved_accounts_with_banks(current_user)
     
     @vas_bp.route('/reserved-accounts/with-banks', methods=['GET'])
     @token_required
@@ -4551,9 +4654,12 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     }
                 })
             else:
+                # Use the same helper function for receipt descriptions
+                description, _ = get_transaction_display_info(transaction)
+                
                 receipt_data.update({
                     'title': f'{txn_type.replace("_", " ").title()} Receipt',
-                    'description': f'VAS transaction completed',
+                    'description': description,
                     'details': {
                         'Amount': f"₦{amount:,.2f}",
                         'Type': txn_type.replace("_", " ").title(),
@@ -5007,6 +5113,60 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                         '$set': {'lastUpdated': datetime.utcnow()}
                     }
                 )
+                
+                # Auto-create expense entry (auto-bookkeeping) for bill payments
+                try:
+                    # Generate category-specific description
+                    category_display = {
+                        'electricity': 'Electricity Bill',
+                        'cable_tv': 'Cable TV Subscription', 
+                        'internet': 'Internet Subscription',
+                        'transportation': 'Transportation Payment'
+                    }.get(category.lower(), 'Bill Payment')
+                    
+                    base_description = f'{category_display} - {provider} ₦{amount:,.2f}'
+                    
+                    # Generate retention-focused description
+                    retention_description = generate_retention_description(
+                        base_description,
+                        '',  # No savings message for bills yet
+                        0    # No discount applied for bills yet
+                    )
+                    
+                    expense_entry = {
+                        '_id': ObjectId(),
+                        'userId': ObjectId(current_user['_id']),
+                        'title': category_display,
+                        'amount': amount,
+                        'category': 'Utilities',  # All bill payments go under Utilities
+                        'date': datetime.utcnow(),
+                        'description': retention_description,
+                        'isPending': False,
+                        'isRecurring': False,
+                        'metadata': {
+                            'source': 'vas_bill_payment',
+                            'billCategory': category,
+                            'provider': provider,
+                            'accountNumber': account_number,
+                            'transactionId': str(transaction['_id']),
+                            'automated': True,
+                            'retentionData': {
+                                'originalPrice': amount,
+                                'finalPrice': amount,
+                                'totalSaved': 0,
+                                'userTier': 'basic'
+                            }
+                        },
+                        'createdAt': datetime.utcnow(),
+                        'updatedAt': datetime.utcnow()
+                    }
+                    
+                    mongo.db.expenses.insert_one(expense_entry)
+                    print(f'✅ Auto-created expense entry for {category_display}: ₦{amount:,.2f}')
+                    
+                except Exception as e:
+                    print(f'⚠️ Failed to create automated expense entry: {str(e)}')
+                    # Don't fail the transaction if expense entry creation fails
                 
                 # Create success notification
                 try:
