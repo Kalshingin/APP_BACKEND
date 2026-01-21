@@ -4548,6 +4548,141 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
+    @vas_bp.route('/reserved-account/add-linked-accounts', methods=['POST'])
+    @token_required
+    def add_linked_accounts(current_user):
+        """Add additional bank accounts to existing reserved account for verified users"""
+        try:
+            user_id = str(current_user['_id'])
+            data = request.get_json()
+            
+            if not data:
+                return jsonify({
+                    'success': False,
+                    'message': 'Request data is required'
+                }), 400
+            
+            get_all_available_banks = data.get('getAllAvailableBanks', False)
+            preferred_banks = data.get('preferredBanks', [])
+            
+            print(f'🏦 Adding linked accounts for user {user_id}')
+            print(f'🏦 getAllAvailableBanks: {get_all_available_banks}')
+            print(f'🏦 preferredBanks: {preferred_banks}')
+            
+            # Get user's existing reserved account
+            user_doc = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+            if not user_doc:
+                return jsonify({
+                    'success': False,
+                    'message': 'User not found'
+                }), 404
+            
+            # Check if user has existing reserved account
+            reserved_account_ref = user_doc.get('reservedAccountReference')
+            if not reserved_account_ref:
+                return jsonify({
+                    'success': False,
+                    'message': 'No existing reserved account found. Please create one first.'
+                }), 400
+            
+            # Check if user is already verified (has BVN/NIN)
+            bvn = user_doc.get('bvn')
+            nin = user_doc.get('nin')
+            
+            if not bvn:
+                return jsonify({
+                    'success': False,
+                    'message': 'BVN verification required before adding additional accounts'
+                }), 400
+            
+            print(f'🏦 User has existing account reference: {reserved_account_ref}')
+            print(f'🏦 User is verified with BVN: {bvn[:3]}***')
+            
+            # Call Monnify add-linked-accounts endpoint
+            monnify_token = get_monnify_token()
+            if not monnify_token:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to authenticate with payment provider'
+                }), 500
+            
+            # Prepare Monnify request
+            monnify_url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/add-linked-accounts/{reserved_account_ref}"
+            monnify_headers = {
+                'Authorization': f'Bearer {monnify_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            monnify_payload = {
+                'getAllAvailableBanks': get_all_available_banks,
+                'preferredBanks': preferred_banks
+            }
+            
+            print(f'🏦 Calling Monnify add-linked-accounts: {monnify_url}')
+            print(f'🏦 Payload: {monnify_payload}')
+            
+            monnify_response = requests.put(
+                monnify_url,
+                headers=monnify_headers,
+                json=monnify_payload,
+                timeout=30
+            )
+            
+            print(f'🏦 Monnify response status: {monnify_response.status_code}')
+            print(f'🏦 Monnify response: {monnify_response.text}')
+            
+            if monnify_response.status_code == 200:
+                monnify_data = monnify_response.json()
+                
+                if monnify_data.get('requestSuccessful'):
+                    response_body = monnify_data.get('responseBody', {})
+                    accounts = response_body.get('accounts', [])
+                    
+                    # Update user document with new accounts
+                    update_data = {
+                        'reservedAccounts': accounts,
+                        'availableBanks': accounts,
+                        'lastUpdated': datetime.utcnow()
+                    }
+                    
+                    mongo.db.users.update_one(
+                        {'_id': ObjectId(user_id)},
+                        {'$set': update_data}
+                    )
+                    
+                    print(f'🏦 Successfully added {len(accounts)} linked accounts')
+                    
+                    return jsonify({
+                        'success': True,
+                        'data': {
+                            'accounts': accounts,
+                            'availableBanks': accounts,
+                            'message': f'Successfully added {len(accounts)} additional bank accounts'
+                        },
+                        'message': 'Additional bank accounts added successfully'
+                    }), 200
+                else:
+                    error_msg = monnify_data.get('responseMessage', 'Failed to add linked accounts')
+                    print(f'🏦 Monnify error: {error_msg}')
+                    return jsonify({
+                        'success': False,
+                        'message': error_msg
+                    }), 400
+            else:
+                print(f'🏦 Monnify API error: {monnify_response.status_code}')
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to add additional bank accounts. Please try again.'
+                }), 500
+                
+        except Exception as e:
+            print(f'❌ Error adding linked accounts: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to add additional bank accounts',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
     @vas_bp.route('/reserved-account/transactions', methods=['GET'])
     @token_required
     def get_reserved_account_transactions(current_user):
