@@ -4353,37 +4353,28 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
-    @vas_bp.route('/reserved-accounts', methods=['GET'])
-    @token_required
-    def get_reserved_accounts(current_user):
-        """Get user's reserved accounts (alias for backward compatibility)"""
-        # Call the actual function directly since current_user is already passed by @token_required
-        return get_reserved_accounts_with_banks(current_user)
-    
-    @vas_bp.route('/reserved-accounts/with-banks', methods=['GET'])
-    @token_required
-    def get_reserved_accounts_with_banks(current_user):
-        """Get user's reserved accounts with available banks"""
+    def _get_reserved_accounts_with_banks_logic(current_user):
+        """Business logic for getting user's reserved accounts with available banks"""
         try:
             user_id = str(current_user['_id'])
             
             # Get user's reserved account
             wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
             if not wallet:
-                return jsonify({
+                return {
                     'success': False,
                     'message': 'No wallet found',
                     'data': None
-                }), 404
+                }, 404
             
             # Get accounts from wallet (correct field name)
             accounts = wallet.get('accounts', [])
             if not accounts:
-                return jsonify({
+                return {
                     'success': False,
                     'message': 'No accounts found',
                     'data': None
-                }), 404
+                }, 404
             
             # Get preferred bank info
             preferred_bank_code = wallet.get('preferredBankCode')
@@ -4400,7 +4391,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 preferred_bank = accounts[0]
             
             # Return accounts with bank information
-            return jsonify({
+            return {
                 'success': True,
                 'data': {
                     'accounts': accounts,
@@ -4410,15 +4401,31 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'hasMultipleBanks': len(accounts) > 1
                 },
                 'message': 'Reserved accounts retrieved successfully'
-            }), 200
+            }, 200
             
         except Exception as e:
             print(f'❌ Error getting reserved accounts with banks: {str(e)}')
-            return jsonify({
+            return {
                 'success': False,
                 'message': 'Failed to retrieve reserved accounts',
                 'errors': {'general': [str(e)]}
-            }), 500
+            }, 500
+
+    @vas_bp.route('/reserved-accounts', methods=['GET'])
+    @token_required
+    def get_reserved_accounts(current_user):
+        """Get user's reserved accounts (alias for backward compatibility)"""
+        # Call the business logic function
+        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
+        return jsonify(result), status_code
+    
+    @vas_bp.route('/reserved-accounts/with-banks', methods=['GET'])
+    @token_required
+    def get_reserved_accounts_with_banks(current_user):
+        """Get user's reserved accounts with available banks"""
+        # Call the business logic function
+        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
+        return jsonify(result), status_code
 
     @vas_bp.route('/reserved-account', methods=['GET'])
     @token_required
