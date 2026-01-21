@@ -4777,6 +4777,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'errors': {'category': [f'Category {category} is not supported']}
                 }), 400
             
+            print(f'📡 Calling Monnify API for category: {monnify_category}')
             access_token = get_monnify_access_token()
             response = call_monnify_bills_api(
                 f'billers?category_code={monnify_category}&size=100',
@@ -4785,6 +4786,45 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             )
             
             print(f'📡 Monnify providers response for {monnify_category}: {response}')
+            
+            # DEBUGGING: Check if we're getting wrong providers for transportation
+            if category.lower() == 'transportation':
+                print(f'🚨 TRANSPORTATION DEBUG: Raw Monnify response: {json.dumps(response, indent=2)}')
+                
+                # Check if any providers contain electricity-related terms
+                electricity_keywords = ['electricity', 'electric', 'distribution', 'disco', 'power', 'energy']
+                raw_providers = response.get('responseBody', {}).get('content', [])
+                
+                electricity_providers = []
+                for provider in raw_providers:
+                    provider_name = provider.get('name', '').lower()
+                    if any(keyword in provider_name for keyword in electricity_keywords):
+                        electricity_providers.append(provider)
+                
+                if electricity_providers:
+                    print(f'🚨 TRANSPORTATION ISSUE: Found {len(electricity_providers)} electricity providers in transportation category!')
+                    print(f'🚨 Electricity providers: {[p.get("name") for p in electricity_providers]}')
+                    print(f'🚨 This indicates Monnify API configuration issue - transportation category returning electricity providers')
+                    
+                    # Return error with detailed explanation
+                    return jsonify({
+                        'success': False,
+                        'message': 'Transportation providers are misconfigured on the payment gateway',
+                        'errors': {
+                            'backend_issue': [
+                                'Monnify API is returning electricity providers for transportation category',
+                                'This is a payment gateway configuration issue, not an app issue',
+                                f'Found {len(electricity_providers)} electricity providers in transportation response'
+                            ]
+                        },
+                        'debug_info': {
+                            'requested_category': category,
+                            'monnify_category': monnify_category,
+                            'total_providers': len(raw_providers),
+                            'electricity_providers_found': len(electricity_providers),
+                            'electricity_provider_names': [p.get('name') for p in electricity_providers]
+                        }
+                    }), 503  # Service Unavailable
             
             providers = []
             for biller in response['responseBody']['content']:
