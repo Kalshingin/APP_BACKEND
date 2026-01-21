@@ -2778,6 +2778,59 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             if should_process:
                 # ────────────────────────────────────────────────────────────────
+                # 🚨 CRITICAL FIX: Check if this is a VAS confirmation first
+                # ────────────────────────────────────────────────────────────────
+                
+                # Extract transaction reference for VAS detection
+                transaction_reference = ''
+                if 'eventData' in data:
+                    transaction_reference = data['eventData'].get('transactionReference', '')
+                else:
+                    transaction_reference = data.get('transactionReference', '')
+                
+                print(f"🔍 Checking if webhook is for VAS transaction: {transaction_reference}")
+                
+                # Check if this webhook is for an existing VAS transaction (airtime/data)
+                existing_vas_txn = mongo.db.vas_transactions.find_one({
+                    '$or': [
+                        {'requestId': transaction_reference},
+                        {'transactionReference': transaction_reference}
+                    ],
+                    'type': {'$in': ['AIRTIME', 'DATA']}
+                })
+                
+                if existing_vas_txn:
+                    # This is a VAS confirmation - update existing transaction, don't create new one
+                    print(f'📱 VAS confirmation webhook detected for: {transaction_reference}')
+                    print(f'   Transaction ID: {existing_vas_txn["_id"]}')
+                    print(f'   Type: {existing_vas_txn.get("type")}')
+                    print(f'   Current Status: {existing_vas_txn.get("status")}')
+                    
+                    # Update existing transaction with webhook confirmation
+                    update_data = {
+                        'providerConfirmed': True,
+                        'webhookReceived': datetime.utcnow(),
+                        'webhookData': data,
+                        'updatedAt': datetime.utcnow()
+                    }
+                    
+                    # If transaction is still PENDING, update to SUCCESS
+                    if existing_vas_txn.get('status') == 'PENDING':
+                        update_data['status'] = 'SUCCESS'
+                        print(f'✅ Updated PENDING VAS transaction to SUCCESS: {transaction_reference}')
+                    
+                    mongo.db.vas_transactions.update_one(
+                        {'_id': existing_vas_txn['_id']},
+                        {'$set': update_data}
+                    )
+                    
+                    print(f'✅ VAS confirmation processed - no duplicate transaction created')
+                    return jsonify({'success': True, 'message': 'VAS confirmation processed'}), 200
+                
+                # If we reach here, it's not a VAS confirmation - proceed with wallet funding logic
+                print(f'💰 Processing as wallet funding (not VAS confirmation)')
+                
+                # ────────────────────────────────────────────────────────────────
                 # IMPROVED EXTRACTION - handles real Monnify reserved account format
                 # ────────────────────────────────────────────────────────────────
                 # Default values
@@ -3265,6 +3318,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'data': {
                     'transactionId': str(transaction_id),
                     'requestId': request_id,
+                    'phoneNumber': phone_number,  # 🔧 FIX: Include phone number in response
+                    'network': network,  # 🔧 FIX: Include network in response
                     'faceValue': amount,
                     'amountCharged': selling_price,
                     'margin': margin,
@@ -3566,6 +3621,8 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'data': {
                     'transactionId': str(transaction_id),
                     'requestId': request_id,
+                    'phoneNumber': phone_number,  # 🔧 FIX: Include phone number in response
+                    'network': network,  # 🔧 FIX: Include network in response
                     'planName': data_plan_name,
                     'originalAmount': amount,
                     'amountCharged': selling_price,
@@ -4554,51 +4611,57 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         """Add additional bank accounts to existing reserved account for verified users"""
         try:
             user_id = str(current_user['_id'])
-            data = request.get_json()
+            data = request.get_json() or {}
             
-            if not data:
-                return jsonify({
-                    'success': False,
-                    'message': 'Request data is required'
-                }), 400
-            
+            # Support both parameter formats for flexibility
             get_all_available_banks = data.get('getAllAvailableBanks', False)
-            preferred_banks = data.get('preferredBanks', [])
+            preferred_banks = data.get('preferredBanks', data.get('bankCodes', ['50515', '101']))
             
             print(f'🏦 Adding linked accounts for user {user_id}')
             print(f'🏦 getAllAvailableBanks: {get_all_available_banks}')
             print(f'🏦 preferredBanks: {preferred_banks}')
             
-            # Get user's existing reserved account
+            # Get user's wallet
             user_doc = mongo.db.users.find_one({'_id': ObjectId(user_id)})
             if not user_doc:
-                return jsonify({
-                    'success': False,
-                    'message': 'User not found'
-                }), 404
+                return jsonify({'success': False, 'message': 'User not found'}), 404
             
-            # Check if user has existing reserved account
-            reserved_account_ref = user_doc.get('reservedAccountReference')
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({'success': False, 'message': 'No wallet found. Please create one first.'}), 404
+            
+            reserved_account_ref = wallet.get('reservedAccountReference') or wallet.get('accountReference')
             if not reserved_account_ref:
-                return jsonify({
-                    'success': False,
-                    'message': 'No existing reserved account found. Please create one first.'
-                }), 400
+                return jsonify({'success': False, 'message': 'No existing reserved account reference found.'}), 400
             
-            # Check if user is already verified (has BVN/NIN)
-            bvn = user_doc.get('bvn')
-            nin = user_doc.get('nin')
-            
-            if not bvn:
+            # Gate: only allow for fully verified users (BVN + NIN present)
+            if not user_doc.get('bvn'):
                 return jsonify({
                     'success': False,
                     'message': 'BVN verification required before adding additional accounts'
                 }), 400
             
             print(f'🏦 User has existing account reference: {reserved_account_ref}')
-            print(f'🏦 User is verified with BVN: {bvn[:3]}***')
+            print(f'🏦 User is verified with BVN: {user_doc.get("bvn", "")[:3]}***')
             
-            # Call Monnify add-linked-accounts endpoint
+            # Check which banks are already present (avoid duplicate requests)
+            existing_accounts = wallet.get('accounts', [])
+            existing_bank_codes = {acc.get('bankCode') for acc in existing_accounts if acc.get('bankCode')}
+            banks_to_add = [code for code in preferred_banks if code not in existing_bank_codes]
+            
+            if not banks_to_add and not get_all_available_banks:
+                print("All requested banks already present")
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'added': [],
+                        'alreadyPresent': list(existing_bank_codes),
+                        'totalBanks': len(existing_accounts)
+                    },
+                    'message': 'All requested banks are already linked.'
+                }), 200
+            
+            # Authenticate with Monnify
             monnify_token = get_monnify_token()
             if not monnify_token:
                 return jsonify({
@@ -4606,58 +4669,54 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Failed to authenticate with payment provider'
                 }), 500
             
-            # Prepare Monnify request
-            monnify_url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/add-linked-accounts/{reserved_account_ref}"
-            monnify_headers = {
+            # Use the CORRECT Monnify API URL and payload structure from their docs
+            url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/add-linked-accounts/{reserved_account_ref}"
+            
+            # Prepare payload according to Monnify documentation
+            payload = {
+                'getAllAvailableBanks': get_all_available_banks,
+                'preferredBanks': preferred_banks if not get_all_available_banks else []
+            }
+            
+            print(f'🏦 Calling Monnify: {url}')
+            print(f'🏦 Payload: {payload}')
+            
+            headers = {
                 'Authorization': f'Bearer {monnify_token}',
                 'Content-Type': 'application/json'
             }
             
-            monnify_payload = {
-                'getAllAvailableBanks': get_all_available_banks,
-                'preferredBanks': preferred_banks
-            }
+            # Use PUT method as shown in Monnify docs
+            response = requests.put(url, headers=headers, json=payload, timeout=30)
+            print(f'🏦 Monnify response status: {response.status_code}')
+            print(f'🏦 Monnify response: {response.text}')
             
-            print(f'🏦 Calling Monnify add-linked-accounts: {monnify_url}')
-            print(f'🏦 Payload: {monnify_payload}')
-            
-            monnify_response = requests.put(
-                monnify_url,
-                headers=monnify_headers,
-                json=monnify_payload,
-                timeout=30
-            )
-            
-            print(f'🏦 Monnify response status: {monnify_response.status_code}')
-            print(f'🏦 Monnify response: {monnify_response.text}')
-            
-            if monnify_response.status_code == 200:
-                monnify_data = monnify_response.json()
+            if response.status_code == 200:
+                monnify_data = response.json()
                 
                 if monnify_data.get('requestSuccessful'):
                     response_body = monnify_data.get('responseBody', {})
                     accounts = response_body.get('accounts', [])
                     
-                    # Update user document with new accounts
-                    update_data = {
-                        'reservedAccounts': accounts,
-                        'availableBanks': accounts,
-                        'lastUpdated': datetime.utcnow()
-                    }
-                    
-                    mongo.db.users.update_one(
-                        {'_id': ObjectId(user_id)},
-                        {'$set': update_data}
+                    # Update wallet document with new accounts
+                    mongo.db.vas_wallets.update_one(
+                        {'userId': ObjectId(user_id)},
+                        {
+                            '$set': {
+                                'accounts': accounts,
+                                'updatedAt': datetime.utcnow()
+                            }
+                        }
                     )
                     
-                    print(f'🏦 Successfully added {len(accounts)} linked accounts')
+                    print(f'🏦 Successfully updated wallet with {len(accounts)} linked accounts')
                     
                     return jsonify({
                         'success': True,
                         'data': {
                             'accounts': accounts,
-                            'availableBanks': accounts,
-                            'message': f'Successfully added {len(accounts)} additional bank accounts'
+                            'totalBanksNow': len(accounts),
+                            'message': f'Successfully added additional bank accounts'
                         },
                         'message': 'Additional bank accounts added successfully'
                     }), 200
@@ -4669,18 +4728,73 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                         'message': error_msg
                     }), 400
             else:
-                print(f'🏦 Monnify API error: {monnify_response.status_code}')
+                print(f'🏦 Monnify API error: {response.status_code}')
+                error_msg = response.text
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('responseMessage') or error_data.get('message') or error_msg
+                except:
+                    pass
                 return jsonify({
                     'success': False,
-                    'message': 'Failed to add additional bank accounts. Please try again.'
-                }), 500
+                    'message': f'Failed to add additional bank accounts: {error_msg}'
+                }), response.status_code
                 
         except Exception as e:
             print(f'❌ Error adding linked accounts: {str(e)}')
+            import traceback
+            traceback.print_exc()
             return jsonify({
                 'success': False,
                 'message': 'Failed to add additional bank accounts',
-                'errors': {'general': [str(e)]}
+                'error': str(e)
+            }), 500
+            
+            monnify_data = response.json()
+            if not monnify_data.get('requestSuccessful'):
+                return jsonify({
+                    'success': False,
+                    'message': monnify_data.get('responseMessage', 'Unknown Monnify error')
+                }), 400
+            
+            updated_accounts = monnify_data.get('responseBody', {}).get('accounts', [])
+            if not updated_accounts:
+                return jsonify({
+                    'success': False,
+                    'message': 'Monnify returned no accounts after adding'
+                }), 500
+            
+            # Update wallet document with new accounts list
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'accounts': updated_accounts,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            print(f"Successfully added {len(banks_to_add)} linked accounts. Now has {len(updated_accounts)} banks.")
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'added': banks_to_add,
+                    'totalBanksNow': len(updated_accounts),
+                    'accounts': updated_accounts  # full updated list for frontend
+                },
+                'message': f'Successfully added {len(banks_to_add)} additional bank account(s).'
+            }), 200
+            
+        except Exception as e:
+            print(f"ERROR adding linked banks: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                'success': False,
+                'message': 'Failed to add linked bank accounts',
+                'error': str(e)
             }), 500
     
     @vas_bp.route('/reserved-account/transactions', methods=['GET'])
