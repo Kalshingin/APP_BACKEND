@@ -4184,10 +4184,7 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                 },
                 'message': 'Treasury metrics error, showing fallback data'
             })
-                    }
-                }
-            ]
-            
+                
             deposits_result = list(mongo.db.vas_transactions.aggregate(deposits_pipeline))
             total_deposits = deposits_result[0]['totalDeposits'] if deposits_result else 0.0
             
@@ -4605,3 +4602,4 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
             }), 500
          
     return admin_bp
+
