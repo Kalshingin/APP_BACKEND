@@ -3758,77 +3758,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
         except Exception as e:
             print(f"[ERROR] /vas/transactions/all failed: {str(e)}")
             import traceback
-                created_at = txn.get('createdAt')
-                if not isinstance(created_at, datetime):
-                    created_at = datetime.utcnow()
-                    print(f"[INCOME WARN] Invalid createdAt for income {txn['_id']} - using now")
-                
-                all_transactions.append({
-                    '_id': str(txn['_id']),
-                    'type': 'INCOME',
-                    'subtype': 'INCOME',
-                    'amount': txn.get('amount', 0),
-                    'description': txn.get('description', 'Income received'),
-                    'title': txn.get('source', 'Income'),
-                    'source': txn.get('source', 'Unknown'),
-                    'reference': '',
-                    'status': 'SUCCESS',
-                    'createdAt': created_at.isoformat() + 'Z',
-                    'date': created_at.isoformat() + 'Z',
-                    'category': txn.get('category', 'Income')
-                })
-            
-            # ────────────────────────────────────────────────────────────────
-            # 3. Expense Transactions
-            # ────────────────────────────────────────────────────────────────
-            expense_cursor = mongo.db.expenses.find({'userId': ObjectId(user_id)}).sort('createdAt', -1)
-            expense_transactions = list(expense_cursor)
-            print(f"[EXPENSE] Found {len(expense_transactions)} records for user {user_id}")
-            
-            for txn in expense_transactions:
-                created_at = txn.get('createdAt')
-                if not isinstance(created_at, datetime):
-                    created_at = datetime.utcnow()
-                    print(f"[EXPENSE WARN] Invalid createdAt for expense {txn['_id']} - using now")
-                
-                all_transactions.append({
-                    '_id': str(txn['_id']),
-                    'type': 'EXPENSE',
-                    'subtype': 'EXPENSE',
-                    'amount': -txn.get('amount', 0),
-                    'description': txn.get('description', 'Expense recorded'),
-                    'title': txn.get('title', 'Expense'),
-                    'reference': '',
-                    'status': 'SUCCESS',
-                    'createdAt': created_at.isoformat() + 'Z',
-                    'date': created_at.isoformat() + 'Z',
-                    'category': txn.get('category', 'Expense')
-                })
-            
-            # ────────────────────────────────────────────────────────────────
-            # Final sort (newest first) + pagination
-            # ────────────────────────────────────────────────────────────────
-            all_transactions.sort(key=lambda x: x['createdAt'], reverse=True)
-            paginated = all_transactions[skip:skip + limit]
-            
-            print(f"[SUMMARY] Total: {len(all_transactions)} | Paginated: {len(paginated)}")
-            if paginated:
-                types = [t['type'] for t in paginated[:5]]
-                print(f"[SUMMARY] First 5 types: {types}")
-            
-            return jsonify({
-                'success': True,
-                'data': paginated,
-                'total': len(all_transactions),
-                'limit': limit,
-                'skip': skip,
-                'message': 'All transactions loaded successfully'
-            }), 200
-            
-        except Exception as e:
-            print(f"[ERROR] /vas/transactions/all failed: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
+            traceback.print_exc()
             return jsonify({
                 'success': False,
                 'message': 'Failed to load transactions',
