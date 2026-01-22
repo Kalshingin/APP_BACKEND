@@ -4075,7 +4075,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 }), 500
             
             # Use the CORRECT Monnify API URL and payload structure from their docs
-            url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/add-linked-accounts/{reserved_account_ref}"
+            url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/{reserved_account_ref}/add-linked-accounts"
             
             # Prepare payload according to Monnify documentation
             payload = {
@@ -4138,6 +4138,20 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('responseMessage') or error_data.get('message') or error_msg
+                    
+                    # Handle specific error cases
+                    if response.status_code == 404:
+                        error_msg = 'Reserved account not found. Please contact support.'
+                    elif response.status_code == 400:
+                        if 'not qualified' in error_msg.lower():
+                            error_msg = 'Your account is not qualified to add additional bank accounts. Please complete your profile verification.'
+                        elif 'already exists' in error_msg.lower():
+                            error_msg = 'These bank accounts are already linked to your account.'
+                    elif response.status_code == 403:
+                        error_msg = 'Access denied. Please contact support.'
+                    elif response.status_code >= 500:
+                        error_msg = 'Payment provider is temporarily unavailable. Please try again later.'
+                        
                 except:
                     pass
                 return jsonify({
@@ -4154,30 +4168,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'message': 'Failed to add additional bank accounts',
                 'error': str(e)
             }), 500
-            
-            monnify_data = response.json()
-            if not monnify_data.get('requestSuccessful'):
-                return jsonify({
-                    'success': False,
-                    'message': monnify_data.get('responseMessage', 'Unknown Monnify error')
-                }), 400
-            
-            updated_accounts = monnify_data.get('responseBody', {}).get('accounts', [])
-            if not updated_accounts:
-                return jsonify({
-                    'success': False,
-                    'message': 'Monnify returned no accounts after adding'
-                }), 500
-            
-            # Update wallet document with new accounts list
-            mongo.db.vas_wallets.update_one(
-                {'userId': ObjectId(user_id)},
-                {
-                    '$set': {
-                        'accounts': updated_accounts,
-                        'updatedAt': datetime.utcnow()
-                    }
-                }
             )
             
             print(f"Successfully added {len(banks_to_add)} linked accounts. Now has {len(updated_accounts)} banks.")
