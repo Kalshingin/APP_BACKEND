@@ -17,6 +17,7 @@ import hashlib
 import uuid
 import json
 import pymongo
+import time
 from utils.email_service import get_email_service
 from utils.dynamic_pricing_engine import get_pricing_engine, calculate_vas_price
 from utils.emergency_pricing_recovery import tag_emergency_transaction
@@ -3535,69 +3536,228 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
 
     # ==================== TRANSACTION ENDPOINTS ====================
     
+    # Cache for transaction queries (5 minute TTL)
+    _transaction_cache = {}
+    _cache_ttl = 300  # 5 minutes
+    
+    def _get_cache_key(user_id, limit, skip):
+        """Generate cache key for transaction queries"""
+        return f"transactions_{user_id}_{limit}_{skip}"
+    
+    def _is_cache_valid(cache_entry):
+        """Check if cache entry is still valid"""
+        return (datetime.utcnow() - cache_entry['timestamp']).total_seconds() < _cache_ttl
+    
     @vas_bp.route('/transactions/all', methods=['GET'])
     @token_required
     def get_all_user_transactions(current_user):
-        """Get all user transactions (VAS + Income + Expenses) in unified chronological order"""
+        """Get all user transactions (VAS + Income + Expenses) in unified chronological order - OPTIMIZED"""
         try:
             user_id = str(current_user['_id'])
             limit = int(request.args.get('limit', 50))
             skip = int(request.args.get('skip', 0))
             
+            # ────────────────────────────────────────────────────────────────
+            # OPTIMIZATION 0: Check cache first (5-minute TTL)
+            # ────────────────────────────────────────────────────────────────
+            cache_key = _get_cache_key(user_id, limit, skip)
+            if cache_key in _transaction_cache:
+                cache_entry = _transaction_cache[cache_key]
+                if _is_cache_valid(cache_entry):
+                    print(f"[CACHE HIT] Returning cached transactions for user {user_id}")
+                    return jsonify(cache_entry['data']), 200
+                else:
+                    # Remove expired cache entry
+                    del _transaction_cache[cache_key]
+            
+            print(f"[CACHE MISS] Loading transactions for user {user_id} (limit={limit}, skip={skip})")
+            start_time = time.time()
+            
             all_transactions = []
             
             # ────────────────────────────────────────────────────────────────
-            # 1. VAS Transactions - strict type filter
+            # OPTIMIZATION 1: Use aggregation pipeline with $unionWith for better performance
             # ────────────────────────────────────────────────────────────────
-            vas_query = {
-                'userId': ObjectId(user_id),
-                'type': {
-                    '$in': [
-                        'AIRTIME', 'DATA', 'BILL', 'WALLET_FUNDING',
-                        'REFUND_CORRECTION', 'FEE_REFUND', 'KYC_VERIFICATION',
-                        'ACTIVATION_FEE', 'SUBSCRIPTION_FEE'
-                    ]
-                }
-            }
-            vas_cursor = mongo.db.vas_transactions.find(vas_query).sort('createdAt', -1)
-            vas_transactions = list(vas_cursor)
-            print(f"[VAS] Found {len(vas_transactions)} records for user {user_id}")
             
-            for txn in vas_transactions:
-                description, category = get_transaction_display_info(txn)
+            # Build aggregation pipeline to combine all collections efficiently
+            pipeline = [
+                # Start with VAS transactions
+                {
+                    '$match': {
+                        'userId': ObjectId(user_id),
+                        'type': {
+                            '$in': [
+                                'AIRTIME', 'DATA', 'BILL', 'WALLET_FUNDING',
+                                'REFUND_CORRECTION', 'FEE_REFUND', 'KYC_VERIFICATION',
+                                'ACTIVATION_FEE', 'SUBSCRIPTION_FEE'
+                            ]
+                        }
+                    }
+                },
+                {
+                    '$addFields': {
+                        'transactionType': 'VAS',
+                        'subtype': '$type'
+                    }
+                },
+                # Union with income transactions
+                {
+                    '$unionWith': {
+                        'coll': 'incomes',
+                        'pipeline': [
+                            {'$match': {'userId': ObjectId(user_id)}},
+                            {
+                                '$addFields': {
+                                    'transactionType': 'INCOME',
+                                    'subtype': 'INCOME',
+                                    'status': 'SUCCESS'
+                                }
+                            }
+                        ]
+                    }
+                },
+                # Union with expense transactions
+                {
+                    '$unionWith': {
+                        'coll': 'expenses',
+                        'pipeline': [
+                            {'$match': {'userId': ObjectId(user_id)}},
+                            {
+                                '$addFields': {
+                                    'transactionType': 'EXPENSE',
+                                    'subtype': 'EXPENSE',
+                                    'status': 'SUCCESS'
+                                }
+                            }
+                        ]
+                    }
+                },
+                # Sort by creation date (newest first)
+                {'$sort': {'createdAt': -1}},
+                # Apply pagination
+                {'$skip': skip},
+                {'$limit': limit}
+            ]
+            
+            # Execute optimized aggregation
+            print(f"[OPTIMIZED] Executing aggregation pipeline...")
+            aggregation_start = time.time()
+            
+            cursor = mongo.db.vas_transactions.aggregate(pipeline)
+            raw_transactions = list(cursor)
+            
+            aggregation_time = time.time() - aggregation_start
+            print(f"[OPTIMIZED] Aggregation completed in {aggregation_time:.2f}s - found {len(raw_transactions)} transactions")
+            
+            # ────────────────────────────────────────────────────────────────
+            # OPTIMIZATION 2: Streamlined data transformation
+            # ────────────────────────────────────────────────────────────────
+            
+            transform_start = time.time()
+            
+            for txn in raw_transactions:
+                txn_type = txn.get('transactionType', 'UNKNOWN')
                 created_at = txn.get('createdAt')
+                
+                # Ensure valid datetime
                 if not isinstance(created_at, datetime):
                     created_at = datetime.utcnow()
-                    print(f"[VAS WARN] Invalid createdAt for txn {txn['_id']} - using now")
+                    print(f"[WARN] Invalid createdAt for txn {txn['_id']} - using now")
                 
-                all_transactions.append({
-                    '_id': str(txn['_id']),
-                    'type': 'VAS',
-                    'subtype': txn.get('type', 'UNKNOWN'),
-                    'amount': txn.get('amount', 0),
-                    'amountPaid': txn.get('amountPaid', 0),
-                    'fee': txn.get('depositFee', 0),
-                    'description': description,
-                    'reference': txn.get('reference', ''),
-                    'status': txn.get('status', 'UNKNOWN'),
-                    'provider': txn.get('provider', ''),
-                    'createdAt': created_at.isoformat() + 'Z',
-                    'date': created_at.isoformat() + 'Z',
-                    'category': category,
-                    'metadata': {
-                        'phoneNumber': txn.get('phoneNumber', ''),
-                        'planName': txn.get('planName', ''),
-                    }
-                })
+                if txn_type == 'VAS':
+                    description, category = get_transaction_display_info(txn)
+                    all_transactions.append({
+                        '_id': str(txn['_id']),
+                        'type': 'VAS',
+                        'subtype': txn.get('type', 'UNKNOWN'),
+                        'amount': txn.get('amount', 0),
+                        'amountPaid': txn.get('amountPaid', 0),
+                        'fee': txn.get('depositFee', 0),
+                        'description': description,
+                        'reference': txn.get('reference', ''),
+                        'status': txn.get('status', 'UNKNOWN'),
+                        'provider': txn.get('provider', ''),
+                        'createdAt': created_at.isoformat() + 'Z',
+                        'date': created_at.isoformat() + 'Z',
+                        'category': category,
+                        'metadata': {
+                            'phoneNumber': txn.get('phoneNumber', ''),
+                            'planName': txn.get('planName', ''),
+                        }
+                    })
+                elif txn_type == 'INCOME':
+                    all_transactions.append({
+                        '_id': str(txn['_id']),
+                        'type': 'INCOME',
+                        'subtype': 'INCOME',
+                        'amount': txn.get('amount', 0),
+                        'description': txn.get('description', 'Income received'),
+                        'title': txn.get('source', 'Income'),
+                        'source': txn.get('source', 'Unknown'),
+                        'reference': '',
+                        'status': 'SUCCESS',
+                        'createdAt': created_at.isoformat() + 'Z',
+                        'date': created_at.isoformat() + 'Z',
+                        'category': txn.get('category', 'Income')
+                    })
+                elif txn_type == 'EXPENSE':
+                    all_transactions.append({
+                        '_id': str(txn['_id']),
+                        'type': 'EXPENSE',
+                        'subtype': 'EXPENSE',
+                        'amount': -txn.get('amount', 0),
+                        'description': txn.get('description', 'Expense recorded'),
+                        'title': txn.get('title', 'Expense'),
+                        'reference': '',
+                        'status': 'SUCCESS',
+                        'createdAt': created_at.isoformat() + 'Z',
+                        'date': created_at.isoformat() + 'Z',
+                        'category': txn.get('category', 'Expense')
+                    })
+            
+            transform_time = time.time() - transform_start
+            total_time = time.time() - start_time
+            
+            print(f"[OPTIMIZED] Transform completed in {transform_time:.2f}s")
+            print(f"[OPTIMIZED] Total request time: {total_time:.2f}s (was ~6 minutes)")
+            print(f"[OPTIMIZED] Performance improvement: {(360/total_time):.1f}x faster")
             
             # ────────────────────────────────────────────────────────────────
-            # 2. Income Transactions
+            # OPTIMIZATION 3: Cache the result for 5 minutes
             # ────────────────────────────────────────────────────────────────
-            income_cursor = mongo.db.incomes.find({'userId': ObjectId(user_id)}).sort('createdAt', -1)
-            income_transactions = list(income_cursor)
-            print(f"[INCOME] Found {len(income_transactions)} records for user {user_id}")
+            response_data = {
+                'success': True,
+                'data': all_transactions,
+                'total': len(all_transactions),
+                'limit': limit,
+                'skip': skip,
+                'message': 'All transactions loaded successfully',
+                'performance': {
+                    'total_time_seconds': round(total_time, 2),
+                    'aggregation_time_seconds': round(aggregation_time, 2),
+                    'transform_time_seconds': round(transform_time, 2),
+                    'cached': False
+                }
+            }
             
-            for txn in income_transactions:
+            # Store in cache
+            _transaction_cache[cache_key] = {
+                'data': response_data,
+                'timestamp': datetime.utcnow()
+            }
+            
+            # Clean up old cache entries (keep cache size manageable)
+            if len(_transaction_cache) > 100:
+                oldest_key = min(_transaction_cache.keys(), 
+                               key=lambda k: _transaction_cache[k]['timestamp'])
+                del _transaction_cache[oldest_key]
+                print(f"[CACHE] Cleaned up old entry: {oldest_key}")
+            
+            return jsonify(response_data), 200
+            
+        except Exception as e:
+            print(f"[ERROR] /vas/transactions/all failed: {str(e)}")
+            import traceback
                 created_at = txn.get('createdAt')
                 if not isinstance(created_at, datetime):
                     created_at = datetime.utcnow()
@@ -4980,4 +5140,3 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 }), 500
 
     return vas_bp
-
