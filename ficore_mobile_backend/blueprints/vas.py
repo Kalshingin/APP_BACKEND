@@ -1,4 +1,4 @@
-﻿"""
+"""
 VAS (Value Added Services) Blueprint - Production Grade
 Handles wallet management and utility purchases (Airtime, Data, etc.)
 
@@ -4105,8 +4105,13 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     def add_linked_accounts(current_user):
         """Add additional bank accounts to existing reserved account for verified users"""
         try:
+            print(f'🏦 DEBUG: Function started, current_user: {current_user}')
+            
             user_id = str(current_user['_id'])
+            print(f'🏦 DEBUG: user_id extracted: {user_id}')
+            
             data = request.get_json() or {}
+            print(f'🏦 DEBUG: request data: {data}')
             
             # Support both parameter formats for flexibility
             get_all_available_banks = data.get('getAllAvailableBanks', False)
@@ -4117,12 +4122,16 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             print(f'🏦 preferredBanks: {preferred_banks}')
             
             # Get user's wallet
+            print(f'🏦 DEBUG: Looking up user document...')
             user_doc = mongo.db.users.find_one({'_id': ObjectId(user_id)})
             if not user_doc:
+                print(f'🏦 DEBUG: User not found for ID: {user_id}')
                 return jsonify({'success': False, 'message': 'User not found'}), 404
             
+            print(f'🏦 DEBUG: User found, looking up wallet...')
             wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
             if not wallet:
+                print(f'🏦 DEBUG: No wallet found for user: {user_id}')
                 return jsonify({'success': False, 'message': 'No wallet found. Please create one first.'}), 404
             
             reserved_account_ref = wallet.get('reservedAccountReference') or wallet.get('accountReference')
@@ -4157,7 +4166,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 }), 200
             
             # Authenticate with Monnify
-            monnify_token = get_monnify_token()
+            monnify_token = call_monnify_auth()
             if not monnify_token:
                 return jsonify({
                     'success': False,
@@ -4256,28 +4265,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             return jsonify({
                 'success': False,
                 'message': 'Failed to add additional bank accounts',
-                'error': str(e)
-            }), 500
-            
-            print(f"Successfully added {len(banks_to_add)} linked accounts. Now has {len(updated_accounts)} banks.")
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'added': banks_to_add,
-                    'totalBanksNow': len(updated_accounts),
-                    'accounts': updated_accounts  # full updated list for frontend
-                },
-                'message': f'Successfully added {len(banks_to_add)} additional bank account(s).'
-            }), 200
-            
-        except Exception as e:
-            print(f"ERROR adding linked banks: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return jsonify({
-                'success': False,
-                'message': 'Failed to add linked bank accounts',
                 'error': str(e)
             }), 500
     
@@ -5068,6 +5055,5 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                         'type': 'service_error'
                     }
                 }), 500
-
 
     return vas_bp
