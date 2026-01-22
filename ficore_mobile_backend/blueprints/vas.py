@@ -3,7 +3,7 @@ VAS (Value Added Services) Blueprint - Production Grade
 Handles wallet management and utility purchases (Airtime, Data, etc.)
 
 Security: API keys in environment variables, idempotency protection, webhook verification
-Providers: Monnify (wallet), Peyflex (primary VAS), VTpass (backup)
+Providers: Monnify (wallet), Peyflex (primary VAS)
 Pricing: Dynamic pricing engine with subscription tiers and psychological pricing
 """
 
@@ -37,11 +37,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
     PEYFLEX_API_TOKEN = os.environ.get('PEYFLEX_API_TOKEN', '')
     PEYFLEX_BASE_URL = os.environ.get('PEYFLEX_BASE_URL', 'https://client.peyflex.com.ng')
     
-    VTPASS_API_KEY = os.environ.get('VTPASS_API_KEY', '')
-    VTPASS_PUBLIC_KEY = os.environ.get('VTPASS_PUBLIC_KEY', '')
-    VTPASS_SECRET_KEY = os.environ.get('VTPASS_SECRET_KEY', '')
-    VTPASS_BASE_URL = os.environ.get('VTPASS_BASE_URL', 'https://sandbox.vtpass.com')
-    
     VAS_TRANSACTION_FEE = 30.0
     ACTIVATION_FEE = 100.0
     BVN_VERIFICATION_COST = 10.0
@@ -70,725 +65,333 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             if response.status_code == 200:
                 data = response.json()
                 if data.get('requestSuccessful'):
-                    access_token = data['responseBody']['accessToken']
-                    print(f'✅ Monnify access token obtained: {access_token[:20]}...')
-                    return access_token
-                else:
-                    raise Exception(f"Monnify auth failed: {data.get('responseMessage', 'Unknown error')}")
-            else:
-                raise Exception(f"Monnify auth HTTP error: {response.status_code} - {response.text}")
-                
+                    access_token = data.get('responseBody', {}).get('accessToken')
+                    if access_token:
+                        return access_token
+            
+            print(f"Failed to get Monnify token: {response.status_code}")
+            return None
+            
         except Exception as e:
-            print(f'❌ Failed to get Monnify access token: {str(e)}')
-            raise Exception(f'Monnify authentication failed: {str(e)}')
-    
-    def call_monnify_bills_api(endpoint, method='GET', data=None, access_token=None):
-        """Generic Monnify Bills API caller"""
+            print(f"Error getting Monnify token: {e}")
+            return None
+
+    def get_monnify_token():
+        """Alias for get_monnify_access_token for backward compatibility"""
+        return get_monnify_access_token()
+
+    def call_monnify_airtime(network, amount, phone_number, request_id):
+        """Call Monnify Bills API for airtime purchase"""
         try:
-            if not access_token:
-                access_token = get_monnify_access_token()
+            token = get_monnify_access_token()
+            if not token:
+                raise Exception("Failed to get Monnify access token")
             
             headers = {
-                'Authorization': f'Bearer {access_token}',
+                'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json'
             }
             
-            url = f"{MONNIFY_BILLS_BASE_URL}/{endpoint}"
+            # Map network codes for Monnify
+            network_map = {
+                'MTN': 'mtn',
+                'GLO': 'glo', 
+                'AIRTEL': 'airtel',
+                '9MOBILE': '9mobile'
+            }
+            
+            payload = {
+                'serviceID': network_map.get(network, network.lower()),
+                'amount': amount,
+                'phone': phone_number,
+                'request_id': request_id
+            }
+            
+            url = f"{MONNIFY_BILLS_BASE_URL}/airtime"
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('requestSuccessful'):
+                    return data
+            
+            raise Exception(f"Monnify airtime failed: {response.text}")
+            
+        except Exception as e:
+            raise Exception(f"Monnify airtime error: {str(e)}")
+
+    def call_monnify_data(network, plan_id, phone_number, request_id):
+        """Call Monnify Bills API for data purchase"""
+        try:
+            token = get_monnify_access_token()
+            if not token:
+                raise Exception("Failed to get Monnify access token")
+            
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                'serviceID': network.lower(),
+                'billersCode': phone_number,
+                'variation_code': plan_id,
+                'request_id': request_id
+            }
+            
+            url = f"{MONNIFY_BILLS_BASE_URL}/data"
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('requestSuccessful'):
+                    return data
+            
+            raise Exception(f"Monnify data failed: {response.text}")
+            
+        except Exception as e:
+            raise Exception(f"Monnify data error: {str(e)}")
+
+    def call_peyflex_airtime(network, amount, phone_number, request_id):
+        """Call Peyflex API for airtime purchase (fallback)"""
+        try:
+            headers = {
+                'Authorization': f'Bearer {PEYFLEX_API_TOKEN}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                'network': network,
+                'amount': amount,
+                'phone_number': phone_number,
+                'request_id': request_id
+            }
+            
+            url = f"{PEYFLEX_BASE_URL}/api/airtime"
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    return data
+            
+            raise Exception(f"Peyflex airtime failed: {response.text}")
+            
+        except Exception as e:
+            raise Exception(f"Peyflex airtime error: {str(e)}")
+
+    def call_peyflex_data(network, plan_id, phone_number, request_id):
+        """Call Peyflex API for data purchase (fallback)"""
+        try:
+            headers = {
+                'Authorization': f'Bearer {PEYFLEX_API_TOKEN}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                'network': network,
+                'plan_id': plan_id,
+                'phone_number': phone_number,
+                'request_id': request_id
+            }
+            
+            url = f"{PEYFLEX_BASE_URL}/api/data"
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    return data
+            
+            raise Exception(f"Peyflex data failed: {response.text}")
+            
+        except Exception as e:
+            raise Exception(f"Peyflex data error: {str(e)}")
+
+    # ==================== HELPER FUNCTIONS ====================
+
+    def call_monnify_bills_api(endpoint, method='GET', payload=None):
+        """Generic function to call Monnify Bills API"""
+        try:
+            token = get_monnify_access_token()
+            if not token:
+                raise Exception("Failed to get Monnify access token")
+            
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
+            }
+            
+            url = f"{MONNIFY_BILLS_BASE_URL}{endpoint}"
             
             if method.upper() == 'GET':
                 response = requests.get(url, headers=headers, timeout=30)
             elif method.upper() == 'POST':
-                response = requests.post(url, headers=headers, json=data, timeout=30)
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
             else:
                 raise Exception(f"Unsupported HTTP method: {method}")
             
-            print(f'📡 Monnify Bills API {method} {endpoint}: {response.status_code}')
-            
             if response.status_code == 200:
-                return response.json()
-            else:
-                print(f'❌ Monnify Bills API error: {response.status_code} - {response.text}')
-                raise Exception(f'Monnify Bills API error: {response.status_code} - {response.text}')
-                
-        except Exception as e:
-            print(f'❌ Monnify Bills API call failed: {str(e)}')
-            raise Exception(f'Monnify Bills API failed: {str(e)}')
-    
-    def generate_retention_description(base_description, savings_message, discount_applied):
-        """Generate retention-focused transaction description"""
-        try:
-            if discount_applied > 0:
-                return f"{base_description} (Saved ₦{discount_applied:.0f})"
-            else:
-                return base_description
-        except Exception as e:
-            print(f'⚠️ Error generating retention description: {str(e)}')
-            return base_description  # Fallback to base description
-    
-    # ==================== DIAGNOSTIC ENDPOINTS ====================
-    
-    @vas_bp.route('/diagnostic/peyflex-connection', methods=['GET'])
-    @token_required
-    def diagnostic_peyflex_connection(current_user):
-        """Test Peyflex connection with different strategies"""
-        try:
-            # Only allow admin users
-            if not current_user.get('isAdmin', False):
-                return jsonify({
-                    'success': False,
-                    'message': 'Admin access required'
-                }), 403
+                data = response.json()
+                if data.get('requestSuccessful'):
+                    return data.get('responseBody', {})
             
-            from utils.dynamic_pricing_engine import get_pricing_engine
-            
-            # Test the pricing engine connection strategies
-            pricing_engine = get_pricing_engine(mongo.db)
-            
-            # Test data rates fetch
-            test_result = pricing_engine._fetch_data_rates('mtn_sme_data')
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'test_network': 'mtn_sme_data',
-                    'rates_found': len(test_result) if isinstance(test_result, dict) else 0,
-                    'sample_rates': dict(list(test_result.items())[:3]) if isinstance(test_result, dict) else test_result,
-                    'timestamp': datetime.utcnow().isoformat()
-                },
-                'message': 'Peyflex connection test completed'
-            }), 200
+            raise Exception(f"Monnify Bills API failed: {response.text}")
             
         except Exception as e:
-            return jsonify({
-                'success': False,
-                'message': f'Connection test failed: {str(e)}',
-                'error_type': type(e).__name__
-            }), 500
+            raise Exception(f"Monnify Bills API error: {str(e)}")
 
-    @vas_bp.route('/diagnostic/peyflex-test', methods=['GET'])
-    @token_required
-    def diagnostic_peyflex_test(current_user):
-        """Diagnostic endpoint to test Peyflex API configuration"""
+    def check_pending_transaction(user_id, transaction_type, amount, phone_number=None):
+        """Check for pending duplicate transactions (idempotency protection)"""
         try:
-            # Only allow admin users to access this endpoint
-            if not current_user.get('isAdmin', False):
-                return jsonify({
-                    'success': False,
-                    'message': 'Admin access required'
-                }), 403
+            # Look for pending transactions in the last 5 minutes
+            five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
             
-            diagnostic_results = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'environment_check': {},
-                'api_tests': [],
-                'recommendations': []
+            query = {
+                'userId': ObjectId(user_id),
+                'type': transaction_type,
+                'status': 'PENDING',
+                'createdAt': {'$gte': five_minutes_ago}
             }
             
-            # Environment check
-            diagnostic_results['environment_check'] = {
-                'PEYFLEX_BASE_URL': PEYFLEX_BASE_URL,
-                'PEYFLEX_API_TOKEN_SET': bool(PEYFLEX_API_TOKEN),
-                'PEYFLEX_API_TOKEN_LENGTH': len(PEYFLEX_API_TOKEN) if PEYFLEX_API_TOKEN else 0,
-                'PEYFLEX_API_TOKEN_PREVIEW': f"{PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}" if PEYFLEX_API_TOKEN and len(PEYFLEX_API_TOKEN) > 14 else "NOT_SET"
-            }
-            
-            # Test different endpoints
-            test_endpoints = [
-                {
-                    'name': 'Data Plans - MTN SME',
-                    'url': f'{PEYFLEX_BASE_URL}/api/data/plans/?network=mtn_sme_data',
-                    'method': 'GET'
-                },
-                {
-                    'name': 'Data Networks',
-                    'url': f'{PEYFLEX_BASE_URL}/api/data/networks/',
-                    'method': 'GET'
-                }
+            # Add amount check (within ₦1 tolerance for floating point)
+            query['$and'] = [
+                {'sellingPrice': {'$gte': amount - 1}},
+                {'sellingPrice': {'$lte': amount + 1}}
             ]
             
-            for test in test_endpoints:
-                test_result = {
-                    'name': test['name'],
-                    'url': test['url'],
-                    'method': test['method']
-                }
-                
-                try:
-                    headers = {
-                        'User-Agent': 'FiCore-Backend/1.0 (Nigeria; Python-Requests)',
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    }
-                    
-                    if PEYFLEX_API_TOKEN:
-                        headers['Authorization'] = f'Token {PEYFLEX_API_TOKEN}'
-                    
-                    response = requests.get(test['url'], headers=headers, timeout=15)
-                    
-                    test_result.update({
-                        'status_code': response.status_code,
-                        'success': response.status_code == 200,
-                        'response_headers': dict(response.headers),
-                        'response_size': len(response.text),
-                        'response_preview': response.text[:500],
-                        'is_json': False,
-                        'is_html': '<!DOCTYPE html>' in response.text or '<html' in response.text
-                    })
-                    
-                    # Try to parse JSON
-                    try:
-                        json_data = response.json()
-                        test_result['is_json'] = True
-                        test_result['json_type'] = type(json_data).__name__
-                        if isinstance(json_data, list):
-                            test_result['json_length'] = len(json_data)
-                        elif isinstance(json_data, dict):
-                            test_result['json_keys'] = list(json_data.keys())
-                    except:
-                        pass
-                    
-                except Exception as e:
-                    test_result.update({
-                        'success': False,
-                        'error': str(e),
-                        'error_type': type(e).__name__
-                    })
-                
-                diagnostic_results['api_tests'].append(test_result)
+            # Add phone number check if provided
+            if phone_number:
+                query['phoneNumber'] = phone_number
             
-            # Generate recommendations
-            recommendations = []
-            
-            if not PEYFLEX_API_TOKEN:
-                recommendations.append("ERROR: PEYFLEX_API_TOKEN environment variable is not set")
-            
-            for test in diagnostic_results['api_tests']:
-                if not test.get('success', False):
-                    status_code = test.get('status_code')
-                    if status_code == 403:
-                        recommendations.append(f"🚨 403 Forbidden on {test['name']} - Check API token validity and IP whitelist")
-                    elif status_code == 404:
-                        recommendations.append(f"🚨 404 Not Found on {test['name']} - API endpoint may have changed")
-                    elif status_code == 429:
-                        recommendations.append(f"🚨 429 Rate Limited on {test['name']} - Implement rate limiting")
-                    elif 'error' in test:
-                        recommendations.append(f"🚨 Connection error on {test['name']}: {test['error']}")
-                
-                if test.get('is_html', False):
-                    recommendations.append(f"⚠️ {test['name']} returned HTML instead of JSON - API may be down or blocked")
-            
-            if not recommendations:
-                recommendations.append("✅ All tests passed - Peyflex API appears to be working correctly")
-            
-            diagnostic_results['recommendations'] = recommendations
-            
-            return jsonify({
-                'success': True,
-                'data': diagnostic_results,
-                'message': 'Peyflex API diagnostic completed'
-            }), 200
+            pending_txn = mongo.db.vas_transactions.find_one(query)
+            return pending_txn is not None
             
         except Exception as e:
-            return jsonify({
-                'success': False,
-                'message': f'Diagnostic failed: {str(e)}'
-            }), 500
+            print(f"Error checking pending transaction: {e}")
+            return False
 
+    def generate_request_id(user_id, transaction_type):
+        """Generate unique request ID for transactions"""
+        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        random_suffix = str(uuid.uuid4())[:8]
+        return f"{transaction_type}_{user_id[:8]}_{timestamp}_{random_suffix}"
 
-    @vas_bp.route('/diagnostic/peyflex-documentation-test', methods=['GET'])
-    @token_required
-    def diagnostic_peyflex_documentation_test(current_user):
-        """Test Peyflex API endpoints exactly as shown in documentation"""
+    def generate_retention_description(transaction_type, network, amount, phone_number):
+        """Generate user-friendly description for expense entries"""
+        if transaction_type == 'AIRTIME':
+            return f"{network} Airtime ₦{amount:.0f} to {phone_number}"
+        elif transaction_type == 'DATA':
+            return f"{network} Data Bundle ₦{amount:.0f} for {phone_number}"
+        elif transaction_type == 'BILL':
+            return f"Bill Payment ₦{amount:.0f}"
+        else:
+            return f"{transaction_type} ₦{amount:.0f}"
+
+    def check_eligibility(user_doc):
+        """Check if user is eligible for VAS services"""
         try:
-            # Only allow admin users
-            if not current_user.get('isAdmin', False):
-                return jsonify({
-                    'success': False,
-                    'message': 'Admin access required'
-                }), 403
+            # Basic eligibility checks
+            if not user_doc:
+                return False, "User not found"
             
-            results = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'documentation_compliance_test': True,
-                'environment': {
-                    'PEYFLEX_BASE_URL': PEYFLEX_BASE_URL,
-                    'PEYFLEX_API_TOKEN_SET': bool(PEYFLEX_API_TOKEN),
-                    'PEYFLEX_API_TOKEN_LENGTH': len(PEYFLEX_API_TOKEN) if PEYFLEX_API_TOKEN else 0,
-                    'PEYFLEX_API_TOKEN_PREVIEW': f"{PEYFLEX_API_TOKEN[:8]}...{PEYFLEX_API_TOKEN[-4:]}" if PEYFLEX_API_TOKEN and len(PEYFLEX_API_TOKEN) > 12 else "NOT_SET"
-                },
-                'tests': []
-            }
+            # Check if user has required fields
+            if not user_doc.get('email'):
+                return False, "Email required"
             
-            # Test 1: Airtime Networks (NO AUTH - per documentation)
-            print("🔬 Testing Airtime Networks (No Auth)")
-            test_1 = {
-                'name': 'Airtime Networks (No Auth)',
-                'endpoint': '/api/airtime/networks/',
-                'auth_required': False,
-                'documentation_note': 'No authentication is required. Just direct get.'
-            }
-            try:
-                url = f'{PEYFLEX_BASE_URL}/api/airtime/networks/'
-                response = requests.get(url, timeout=15)  # No headers per docs
-                
-                test_1.update({
-                    'status_code': response.status_code,
-                    'success': response.status_code == 200,
-                    'response_length': len(response.text),
-                    'response_preview': response.text[:200]
-                })
-                
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        test_1['json_valid'] = True
-                        test_1['response_type'] = type(data).__name__
-                        if isinstance(data, dict):
-                            test_1['json_keys'] = list(data.keys())
-                        elif isinstance(data, list):
-                            test_1['json_count'] = len(data)
-                    except:
-                        test_1['json_valid'] = False
-                        
-            except Exception as e:
-                test_1.update({
-                    'success': False,
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                })
+            if not user_doc.get('fullName'):
+                return False, "Full name required"
             
-            results['tests'].append(test_1)
+            # Check if user is active
+            if user_doc.get('status') == 'suspended':
+                return False, "Account suspended"
             
-            # Test 2: Data Networks (WITH AUTH - per documentation)
-            print("🔬 Testing Data Networks (With Auth)")
-            test_2 = {
-                'name': 'Data Networks (With Auth)',
-                'endpoint': '/api/data/networks/',
-                'auth_required': True,
-                'documentation_note': 'Requires Authorization: Token header'
-            }
-            try:
-                headers = {
-                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                    'Content-Type': 'application/json'
-                }
-                url = f'{PEYFLEX_BASE_URL}/api/data/networks/'
-                response = requests.get(url, headers=headers, timeout=15)
-                
-                test_2.update({
-                    'status_code': response.status_code,
-                    'success': response.status_code == 200,
-                    'response_length': len(response.text),
-                    'response_preview': response.text[:200]
-                })
-                
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        test_2['json_valid'] = True
-                        test_2['response_type'] = type(data).__name__
-                        if isinstance(data, dict):
-                            test_2['json_keys'] = list(data.keys())
-                        elif isinstance(data, list):
-                            test_2['json_count'] = len(data)
-                    except:
-                        test_2['json_valid'] = False
-                elif response.status_code == 403:
-                    test_2['diagnosis'] = 'API token invalid, account not activated, or IP not whitelisted'
-                        
-            except Exception as e:
-                test_2.update({
-                    'success': False,
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                })
-            
-            results['tests'].append(test_2)
-            
-            # Test 3: Data Plans Sample (WITH AUTH)
-            print("🔬 Testing Data Plans Sample")
-            test_3 = {
-                'name': 'Data Plans Sample (mtn)',
-                'endpoint': '/api/data/plans/?network=mtn',
-                'auth_required': True,
-                'documentation_note': 'Test with simple network name'
-            }
-            try:
-                headers = {
-                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                    'Content-Type': 'application/json'
-                }
-                url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network=mtn'
-                response = requests.get(url, headers=headers, timeout=15)
-                
-                test_3.update({
-                    'status_code': response.status_code,
-                    'success': response.status_code == 200,
-                    'response_length': len(response.text),
-                    'response_preview': response.text[:200]
-                })
-                
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        test_3['json_valid'] = True
-                        test_3['response_type'] = type(data).__name__
-                        if isinstance(data, dict):
-                            test_3['json_keys'] = list(data.keys())
-                        elif isinstance(data, list):
-                            test_3['json_count'] = len(data)
-                    except:
-                        test_3['json_valid'] = False
-                elif response.status_code == 403:
-                    test_3['diagnosis'] = 'API token invalid, account not activated, or IP not whitelisted'
-                elif response.status_code == 404:
-                    test_3['diagnosis'] = 'Network "mtn" not found - try full network IDs like "mtn_gifting_data"'
-                        
-            except Exception as e:
-                test_3.update({
-                    'success': False,
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                })
-            
-            results['tests'].append(test_3)
-            
-            # Test 4: Data Purchase Simulation (WITH AUTH)
-            print("🔬 Testing Data Purchase Simulation")
-            test_4 = {
-                'name': 'Data Purchase Simulation',
-                'endpoint': '/api/data/purchase/',
-                'auth_required': True,
-                'documentation_note': 'Test with sample data purchase payload (simulation only)',
-                'warning': 'This is a simulation test - no actual purchase will be made'
-            }
-            try:
-                headers = {
-                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                    'Content-Type': 'application/json'
-                }
-                
-                # Use test data from documentation (this should not actually charge)
-                test_payload = {
-                    "network": "mtn",
-                    "plan_code": "TEST_PLAN",  # Use a test plan code
-                    "mobile_number": "08144216361"  # Test number from docs
-                }
-                
-                url = f'{PEYFLEX_BASE_URL}/api/data/purchase/'
-                response = requests.post(url, headers=headers, json=test_payload, timeout=15)
-                
-                test_4.update({
-                    'status_code': response.status_code,
-                    'success': response.status_code == 200,
-                    'response_length': len(response.text),
-                    'response_preview': response.text[:200],
-                    'test_payload': test_payload
-                })
-                
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        test_4['json_valid'] = True
-                        test_4['response_type'] = type(data).__name__
-                        if isinstance(data, dict):
-                            test_4['json_keys'] = list(data.keys())
-                    except:
-                        test_4['json_valid'] = False
-                elif response.status_code == 403:
-                    test_4['diagnosis'] = 'API token invalid, account not activated, or IP not whitelisted'
-                elif response.status_code == 422:
-                    test_4['diagnosis'] = 'Invalid plan code or network - this is expected for test data'
-                elif response.status_code == 400:
-                    test_4['diagnosis'] = 'Bad request - check payload format'
-                        
-            except Exception as e:
-                test_4.update({
-                    'success': False,
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                })
-            
-            results['tests'].append(test_4)
-            
-            # Summary
-            successful_tests = sum(1 for test in results['tests'] if test.get('success', False))
-            total_tests = len(results['tests'])
-            
-            results['summary'] = {
-                'total_tests': total_tests,
-                'successful_tests': successful_tests,
-                'failed_tests': total_tests - successful_tests,
-                'success_rate': f"{(successful_tests/total_tests*100):.1f}%" if total_tests > 0 else "0%"
-            }
-            
-            if successful_tests == 0:
-                results['diagnosis'] = "All tests failed - likely API token or account activation issue"
-                results['recommendations'] = [
-                    "Verify API token is correct in environment variables",
-                    "Check if Peyflex account is activated for API access",
-                    "Confirm account has sufficient balance",
-                    "Contact Peyflex support to verify account status",
-                    "Check if server IP needs to be whitelisted"
-                ]
-            elif successful_tests == 1 and results['tests'][0].get('success'):
-                results['diagnosis'] = "Only airtime networks working - authentication/account issue for data services"
-                results['recommendations'] = [
-                    "Airtime networks work (no auth) but data services fail (with auth)",
-                    "This indicates API token or account activation issue",
-                    "Contact Peyflex support to activate data services for your account",
-                    "Verify account has data service permissions"
-                ]
-            elif successful_tests < total_tests:
-                results['diagnosis'] = "Partial success - some endpoints working"
-                results['recommendations'] = [
-                    "Check failed endpoints for specific error messages",
-                    "Verify network IDs match Peyflex's expected format",
-                    "Some endpoints may require different authentication",
-                    "Test with real plan codes from working data plans endpoint"
-                ]
-            else:
-                results['diagnosis'] = "All tests passed - Peyflex API is working correctly"
-                results['recommendations'] = [
-                    "API integration is healthy",
-                    "Monitor for any intermittent issues",
-                    "Consider implementing retry logic for production",
-                    "Test with real transactions in small amounts"
-                ]
-            
-            return jsonify({
-                'success': True,
-                'data': results
-            }), 200
+            return True, "Eligible"
             
         except Exception as e:
-            return jsonify({
-                'success': False,
-                'message': f'Diagnostic test failed: {str(e)}'
-            }), 500
+            print(f"Error checking eligibility: {e}")
+            return False, "Eligibility check failed"
 
-    @vas_bp.route('/diagnostic/peyflex-direct-test', methods=['GET'])
-    @token_required
-    def diagnostic_peyflex_direct_test(current_user):
-        """Direct test of Peyflex API endpoints (Admin only)"""
+    def call_monnify_auth(bvn, nin, phone_number, full_name):
+        """Call Monnify KYC API for account creation"""
         try:
-            # Only allow admin users
-            if not current_user.get('isAdmin', False):
-                return jsonify({
-                    'success': False,
-                    'message': 'Admin access required'
-                }), 403
-            
-            results = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'environment': {
-                    'PEYFLEX_BASE_URL': PEYFLEX_BASE_URL,
-                    'PEYFLEX_API_TOKEN_SET': bool(PEYFLEX_API_TOKEN),
-                    'PEYFLEX_API_TOKEN_LENGTH': len(PEYFLEX_API_TOKEN) if PEYFLEX_API_TOKEN else 0
-                },
-                'tests': []
-            }
+            token = get_monnify_access_token()
+            if not token:
+                raise Exception("Failed to get Monnify access token")
             
             headers = {
-                'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                'Content-Type': 'application/json',
-                'User-Agent': 'FiCore-Backend/1.0'
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
             }
             
-            # Test 1: Data Networks
-            test_1 = {'name': 'Data Networks', 'endpoint': '/api/data/networks/'}
-            try:
-                url = f'{PEYFLEX_BASE_URL}/api/data/networks/'
-                response = requests.get(url, headers=headers, timeout=15)
-                
-                test_1.update({
-                    'status_code': response.status_code,
-                    'success': response.status_code == 200,
-                    'response_size': len(response.text),
-                    'response_preview': response.text[:300]
-                })
-                
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        test_1['data_type'] = type(data).__name__
-                        test_1['data_count'] = len(data) if isinstance(data, list) else 'N/A'
-                    except:
-                        test_1['json_parse_error'] = True
-                        
-            except Exception as e:
-                test_1.update({'error': str(e), 'success': False})
-            
-            results['tests'].append(test_1)
-            
-            # Test 2: MTN SME Data Plans
-            test_2 = {'name': 'MTN SME Data Plans', 'endpoint': '/api/data/plans/?network=mtn_sme_data'}
-            try:
-                url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network=mtn_sme_data'
-                response = requests.get(url, headers=headers, timeout=15)
-                
-                test_2.update({
-                    'status_code': response.status_code,
-                    'success': response.status_code == 200,
-                    'response_size': len(response.text),
-                    'response_preview': response.text[:300]
-                })
-                
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        test_2['data_type'] = type(data).__name__
-                        test_2['data_count'] = len(data) if isinstance(data, list) else 'N/A'
-                        if isinstance(data, list) and len(data) > 0:
-                            test_2['sample_plan'] = data[0]
-                    except:
-                        test_2['json_parse_error'] = True
-                        
-            except Exception as e:
-                test_2.update({'error': str(e), 'success': False})
-            
-            results['tests'].append(test_2)
-            
-            # Test 3: MTN Gifting Data Plans
-            test_3 = {'name': 'MTN Gifting Data Plans', 'endpoint': '/api/data/plans/?network=mtn_gifting_data'}
-            try:
-                url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network=mtn_gifting_data'
-                response = requests.get(url, headers=headers, timeout=15)
-                
-                test_3.update({
-                    'status_code': response.status_code,
-                    'success': response.status_code == 200,
-                    'response_size': len(response.text),
-                    'response_preview': response.text[:300]
-                })
-                
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        test_3['data_type'] = type(data).__name__
-                        test_3['data_count'] = len(data) if isinstance(data, list) else 'N/A'
-                        if isinstance(data, list) and len(data) > 0:
-                            test_3['sample_plan'] = data[0]
-                    except:
-                        test_3['json_parse_error'] = True
-                        
-            except Exception as e:
-                test_3.update({'error': str(e), 'success': False})
-            
-            results['tests'].append(test_3)
-            
-            # Generate recommendations
-            recommendations = []
-            successful_tests = [t for t in results['tests'] if t.get('success', False)]
-            
-            if len(successful_tests) == 0:
-                recommendations.append('🚨 ALL TESTS FAILED - Check API token and network connectivity')
-            elif len(successful_tests) < len(results['tests']):
-                recommendations.append('⚠️ Some tests failed - Check specific endpoints')
-            else:
-                recommendations.append('✅ All tests passed - Peyflex API is working correctly')
-            
-            for test in results['tests']:
-                if not test.get('success', False):
-                    if test.get('status_code') == 403:
-                        recommendations.append(f'🔑 {test["name"]}: 403 Forbidden - Check API token validity')
-                    elif test.get('status_code') == 404:
-                        recommendations.append(f'🔍 {test["name"]}: 404 Not Found - Check endpoint URL')
-                    elif 'error' in test:
-                        recommendations.append(f'🌐 {test["name"]}: Connection error - {test["error"]}')
-            
-            results['recommendations'] = recommendations
-            results['summary'] = {
-                'total_tests': len(results['tests']),
-                'successful_tests': len(successful_tests),
-                'success_rate': f'{len(successful_tests)/len(results["tests"])*100:.1f}%'
+            payload = {
+                'bvn': bvn,
+                'nin': nin,
+                'phoneNumber': phone_number,
+                'fullName': full_name,
+                'contractCode': MONNIFY_CONTRACT_CODE
             }
             
-            return jsonify({
-                'success': True,
-                'data': results,
-                'message': 'Peyflex direct API test completed'
-            }), 200
+            url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts"
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('requestSuccessful'):
+                    return data.get('responseBody', {})
+            
+            raise Exception(f"Monnify KYC failed: {response.text}")
             
         except Exception as e:
-            return jsonify({
-                'success': False,
-                'message': f'Diagnostic test failed: {str(e)}'
-            }), 500
+            raise Exception(f"Monnify KYC error: {str(e)}")
 
-    # ==================== PRICING ENDPOINTS ====================
-    
-    @vas_bp.route('/pricing/calculate', methods=['POST'])
-    @token_required
-    def calculate_pricing(current_user):
-        """
-        Calculate dynamic pricing for VAS services
-        Supports both airtime and data with subscription-based discounts
-        """
+    def get_transaction_display_info(transaction):
+        """Get display information for transaction receipts"""
         try:
-            data = request.json
-            service_type = data.get('type', '').lower()  # 'airtime' or 'data'
-            network = data.get('network', '').upper()
-            amount = float(data.get('amount', 0))
-            plan_id = data.get('planId')  # Required for data
+            txn_type = transaction.get('type', 'UNKNOWN')
+            amount = transaction.get('amount', 0)
+            metadata = transaction.get('metadata', {})
             
-            if service_type not in ['airtime', 'data']:
-                return jsonify({
-                    'success': False,
-                    'message': 'Invalid service type. Must be airtime or data.'
-                }), 400
+            # Generate description based on transaction type
+            if txn_type == 'AIRTIME':
+                network = metadata.get('network', transaction.get('network', 'Unknown'))
+                phone = metadata.get('phoneNumber', transaction.get('phoneNumber', 'Unknown'))
+                description = f'{network} Airtime ₦{amount:,.0f} to {phone}'
+                
+            elif txn_type == 'DATA':
+                network = metadata.get('network', transaction.get('network', 'Unknown'))
+                phone = metadata.get('phoneNumber', transaction.get('phoneNumber', 'Unknown'))
+                plan_name = metadata.get('planName', 'Data Plan')
+                description = f'{network} {plan_name} for {phone}'
+                
+            elif txn_type == 'BILL':
+                provider = metadata.get('provider', 'Bill Payment')
+                description = f'{provider} Payment ₦{amount:,.2f}'
+                
+            elif txn_type == 'WALLET_FUNDING':
+                description = f'Wallet Funding ₦{amount:,.2f}'
+                
+            elif txn_type == 'KYC_VERIFICATION':
+                description = 'Account Verification Completed'
+                
+            else:
+                description = f'{txn_type.replace("_", " ").title()} ₦{amount:,.2f}'
             
-            if not network or amount <= 0:
-                return jsonify({
-                    'success': False,
-                    'message': 'Network and amount are required.'
-                }), 400
+            # Return description and additional info (for future use)
+            additional_info = {
+                'formatted_amount': f"₦{amount:,.2f}",
+                'transaction_type': txn_type,
+                'metadata': metadata
+            }
             
-            if service_type == 'data' and not plan_id:
-                return jsonify({
-                    'success': False,
-                    'message': 'Plan ID is required for data pricing.'
-                }), 400
-            
-            # Determine user tier
-            user_tier = 'basic'
-            if current_user.get('subscriptionStatus') == 'active':
-                subscription_plan = current_user.get('subscriptionPlan', 'premium')
-                user_tier = subscription_plan.lower()
-            
-            # Calculate pricing using dynamic engine
-            pricing_engine = get_pricing_engine(mongo.db)
-            pricing_result = pricing_engine.calculate_selling_price(
-                service_type=service_type,
-                network=network,
-                base_amount=amount,
-                user_tier=user_tier,
-                plan_id=plan_id
-            )
-            
-            # Get competitive analysis
-            competitive_analysis = pricing_engine.get_competitive_analysis(
-                service_type, network, amount
-            )
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'pricing': pricing_result,
-                    'competitive': competitive_analysis,
-                    'userTier': user_tier,
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
-                },
-                'message': 'Pricing calculated successfully'
-            }), 200
+            return description, additional_info
             
         except Exception as e:
-            print(f'❌ Error calculating pricing: {str(e)}')
-            return jsonify({
-                'success': False,
-                'message': 'Failed to calculate pricing',
-                'errors': {'general': [str(e)]}
-            }), 500
+            print(f"Error getting transaction display info: {e}")
+            # Fallback description
+            amount = transaction.get('amount', 0)
+            txn_type = transaction.get('type', 'Transaction')
+            return f'{txn_type} ₦{amount:,.2f}', {}
     
     @vas_bp.route('/pricing/plans/<network>', methods=['GET'])
     @token_required
@@ -1128,16 +731,11 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             # Try Monnify first
             try:
-                access_token = get_monnify_access_token()
-                billers_response = call_monnify_bills_api(
-                    'billers?category_code=AIRTIME&size=100',
-                    'GET',
-                    access_token=access_token
-                )
+                networks_data = call_monnify_bills_api('/billers?category_code=AIRTIME&size=100')
                 
                 # Transform Monnify billers to our format
                 networks = []
-                for biller in billers_response['responseBody']['content']:
+                for biller in networks_data.get('content', []):
                     networks.append({
                         'id': biller['name'].lower().replace(' ', '_'),
                         'name': biller['name'],
@@ -1160,956 +758,42 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 print('🔄 Falling back to Peyflex for airtime networks')
                 
                 url = f'{PEYFLEX_BASE_URL}/api/airtime/networks/'
-                print(f'📡 Calling Peyflex airtime networks API: {url}')
-                
                 response = requests.get(url, timeout=30)
-                print(f'📥 Peyflex airtime networks response status: {response.status_code}')
                 
                 if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        print(f'📊 Peyflex airtime response: {data}')
+                    peyflex_data = response.json()
+                    if peyflex_data.get('success'):
+                        networks = peyflex_data.get('data', [])
                         
-                        # Handle different response formats
-                        networks_list = []
-                        if isinstance(data, dict) and 'networks' in data:
-                            networks_list = data['networks']
-                        elif isinstance(data, list):
-                            networks_list = data
-                        else:
-                            print('⚠️ Unexpected airtime networks response format')
-                            raise Exception('Unexpected response format')
-                        
-                        # Transform to our format
-                        transformed_networks = []
-                        for network in networks_list:
-                            if isinstance(network, dict):
-                                transformed_networks.append({
-                                    'id': network.get('id', network.get('identifier', network.get('network_id', ''))),
-                                    'name': network.get('name', network.get('network_name', '')),
-                                    'source': 'peyflex'
-                                })
-                            elif isinstance(network, str):
-                                # Handle simple string format
-                                transformed_networks.append({
-                                    'id': network.lower(),
-                                    'name': network.upper(),
-                                    'source': 'peyflex'
-                                })
-                        
-                        print(f'✅ Successfully transformed {len(transformed_networks)} airtime networks from Peyflex')
+                        print(f'✅ Successfully retrieved {len(networks)} airtime networks from Peyflex')
                         return jsonify({
                             'success': True,
-                            'data': transformed_networks,
+                            'data': networks,
                             'message': 'Airtime networks retrieved from Peyflex (fallback)',
-                            'source': 'peyflex_fallback'
+                            'source': 'peyflex'
                         }), 200
-                        
-                    except Exception as json_error:
-                        print(f'❌ Error parsing Peyflex airtime networks response: {json_error}')
-                        raise Exception(f'Invalid airtime networks response from Peyflex: {json_error}')
                 
-                else:
-                    print(f'🚨 Peyflex airtime networks API error: {response.status_code} - {response.text}')
-                    raise Exception(f'Peyflex airtime networks API returned {response.status_code}')
-            
-        except Exception as e:
-            print(f'❌ Error getting airtime networks from both providers: {str(e)}')
-            
-            # Return fallback airtime networks
-            networks = [
-                {'id': 'mtn', 'name': 'MTN', 'source': 'fallback'},
-                {'id': 'airtel', 'name': 'Airtel', 'source': 'fallback'},
-                {'id': 'glo', 'name': 'Glo', 'source': 'fallback'},
-                {'id': '9mobile', 'name': '9mobile', 'source': 'fallback'}
-            ]
-            
-            return jsonify({
-                'success': True,
-                'data': networks,
-                'message': 'Emergency fallback airtime networks (both providers unavailable)',
-                'emergency': True
-            }), 200
-
-# ==================== HELPER FUNCTIONS ====================
-    
-    def generate_request_id(user_id, transaction_type):
-        """Generate unique request ID for idempotency"""
-        timestamp = int(datetime.utcnow().timestamp())
-        unique_suffix = str(uuid.uuid4())[:8]
-        return f'FICORE_{transaction_type}_{user_id}_{timestamp}_{unique_suffix}'
-    
-    def check_eligibility(user_id):
-        """
-        Check if user is eligible for dedicated account (Path B)
-        User must meet ONE of these criteria:
-        1. Used app for 3+ consecutive days
-        2. Recorded 10+ transactions (income/expense)
-        """
-        user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
-        
-        # Check 1: Consecutive days - Use rewards.streak as authoritative source
-        rewards_record = mongo.db.rewards.find_one({'user_id': ObjectId(user_id)})
-        login_streak = rewards_record.get('streak', 0) if rewards_record else 0
-        if login_streak >= 3:
-            return True, "3-day streak"
-        
-        # Check 2: Total transactions
-        total_txns = mongo.db.income.count_documents({'userId': ObjectId(user_id)})
-        total_txns += mongo.db.expenses.count_documents({'userId': ObjectId(user_id)})
-        if total_txns >= 10:
-            return True, "10+ transactions"
-        
-        return False, None
-    
-    def get_eligibility_progress(user_id):
-        """Get user's progress towards eligibility"""
-        user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
-        
-        # Use rewards.streak as authoritative source for login streak
-        rewards_record = mongo.db.rewards.find_one({'user_id': ObjectId(user_id)})
-        login_streak = rewards_record.get('streak', 0) if rewards_record else 0
-        total_txns = mongo.db.income.count_documents({'userId': ObjectId(user_id)})
-        total_txns += mongo.db.expenses.count_documents({'userId': ObjectId(user_id)})
-        
-        # Return flat structure that matches frontend expectations
-        return {
-            'loginDays': login_streak,  # Frontend expects 'loginDays', not 'loginStreak'
-            'totalTransactions': total_txns
-        }
-    
-    def call_monnify_auth():
-        """Get Monnify authentication token"""
-        try:
-            auth_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v1/auth/login',
-                auth=(MONNIFY_API_KEY, MONNIFY_SECRET_KEY),
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            )
-            
-            if auth_response.status_code != 200:
-                raise Exception(f'Monnify auth failed: {auth_response.text}')
-            
-            return auth_response.json()['responseBody']['accessToken']
-        except Exception as e:
-            print(f'❌ Monnify auth error: {str(e)}')
-            raise
-    
-    def call_monnify_bvn_verification(bvn, name, dob, mobile):
-        """
-        Call Monnify BVN verification API
-        Cost: ₦10 per successful request
-        """
-        try:
-            access_token = call_monnify_auth()
-            
-            response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v1/vas/bvn-details-match',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json={
-                    'bvn': bvn,
-                    'name': name,
-                    'dateOfBirth': dob,
-                    'mobileNo': mobile
-                },
-                timeout=30
-            )
-            
-            if response.status_code != 200:
-                raise Exception(f'BVN verification failed: {response.text}')
-            
-            data = response.json()
-            if not data.get('requestSuccessful'):
-                raise Exception(f'BVN verification failed: {data.get("responseMessage")}')
-            
-            return data['responseBody']
-        except Exception as e:
-            print(f'❌ BVN verification error: {str(e)}')
-            raise
-    
-    def call_monnify_nin_verification(nin):
-        """
-        Call Monnify NIN verification API
-        Cost: ₦60 per successful request
-        Returns NIN holder's details for validation
-        """
-        try:
-            access_token = call_monnify_auth()
-            
-            response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v1/vas/nin-details',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json={'nin': nin},
-                timeout=30
-            )
-            
-            if response.status_code != 200:
-                raise Exception(f'NIN verification failed: {response.text}')
-            
-            data = response.json()
-            if not data.get('requestSuccessful'):
-                raise Exception(f'NIN verification failed: {data.get("responseMessage")}')
-            
-            return data['responseBody']
-        except Exception as e:
-            print(f'❌ NIN verification error: {str(e)}')
-            raise
-    
-    def check_pending_transaction(user_id, transaction_type, amount, phone_number):
-        """Check for pending duplicate transactions (idempotency)"""
-        cutoff_time = datetime.utcnow() - timedelta(minutes=5)
-        
-        pending_txn = mongo.db.vas_transactions.find_one({
-            'userId': ObjectId(user_id),
-            'type': transaction_type,
-            'amount': amount,
-            'phoneNumber': phone_number,
-            'status': 'PENDING',
-            'createdAt': {'$gte': cutoff_time}
-        })
-        
-        return pending_txn
-    
-    
-    def call_peyflex_airtime(network, amount, phone_number, request_id):
-        """Call Peyflex Airtime API with exact format from documentation"""
-        # Use the exact format from Peyflex documentation
-        payload = {
-            'network': network.lower(),  # Documentation shows lowercase: "mtn"
-            'amount': int(amount),
-            'mobile_number': phone_number
-            # NOTE: Do NOT send request_id - not shown in documentation example
-        }
-        
-        print(f'📤 Peyflex airtime purchase payload: {payload}')
-        print(f'📤 Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
-        
-        headers = {
-            'Authorization': f'Token {PEYFLEX_API_TOKEN}',  # Documentation shows "Token" not "Bearer"
-            'Content-Type': 'application/json',
-            'User-Agent': 'FiCore-Backend/1.0'
-        }
-        
-        url = f'{PEYFLEX_BASE_URL}/api/airtime/topup/'
-        print(f'📡 Calling Peyflex airtime API: {url}')
-        
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            
-            print(f'📥 Peyflex airtime response: {response.status_code}')
-            print(f'📥 Response body: {response.text[:500]}')
-            
-            if response.status_code == 200:
-                try:
-                    return response.json()
-                except Exception as json_error:
-                    print(f'❌ Error parsing Peyflex airtime response: {json_error}')
-                    raise Exception(f'Invalid response format from Peyflex: {json_error}')
-            elif response.status_code == 400:
-                print('🚨 Peyflex airtime API returned 400 Bad Request')
-                try:
-                    error_data = response.json()
-                    error_msg = error_data.get('message', response.text)
-                except:
-                    error_msg = response.text
-                raise Exception(f'Invalid airtime request: {error_msg}')
-            elif response.status_code == 403:
-                print('🚨 Peyflex airtime API returned 403 Forbidden')
-                print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
-                raise Exception('Airtime service access denied - check API credentials and account status')
-            elif response.status_code == 404:
-                print('🚨 Peyflex airtime API returned 404 Not Found')
-                raise Exception('Airtime endpoint not found - check API URL')
-            else:
-                print(f'🚨 Peyflex airtime API error: {response.status_code} - {response.text}')
-                raise Exception(f'Peyflex airtime API error: {response.status_code} - {response.text}')
+                # If both fail, return default networks
+                default_networks = [
+                    {'id': 'mtn', 'name': 'MTN', 'code': 'MTN', 'source': 'default'},
+                    {'id': 'glo', 'name': 'Glo', 'code': 'GLO', 'source': 'default'},
+                    {'id': 'airtel', 'name': 'Airtel', 'code': 'AIRTEL', 'source': 'default'},
+                    {'id': '9mobile', 'name': '9mobile', 'code': '9MOBILE', 'source': 'default'}
+                ]
                 
-        except requests.exceptions.ConnectionError as e:
-            print(f'❌ Connection error to Peyflex: {str(e)}')
-            raise Exception('Unable to connect to Peyflex servers - check network connectivity')
-        except requests.exceptions.Timeout as e:
-            print(f'❌ Timeout error to Peyflex: {str(e)}')
-            raise Exception('Peyflex API request timed out - try again later')
-        except Exception as e:
-            if 'Invalid response format' in str(e) or 'Invalid airtime request' in str(e) or 'access denied' in str(e):
-                raise  # Re-raise our custom exceptions
-            print(f'❌ Unexpected error calling Peyflex: {str(e)}')
-            raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
-
-    # ==================== MONNIFY BILLS API FUNCTIONS ====================
-    
-    def call_monnify_airtime(network, amount, phone_number, request_id):
-        """Call Monnify Bills API for airtime purchase"""
-        try:
-            # Step 1: Get access token
-            access_token = get_monnify_access_token()
-            
-            # Step 2: Map network to Monnify biller code
-            network_mapping = {
-                'MTN': 'MTN',
-                'AIRTEL': 'AIRTEL', 
-                'GLO': 'GLO',
-                '9MOBILE': '9MOBILE'
-            }
-            
-            monnify_network = network_mapping.get(network.upper())
-            if not monnify_network:
-                raise Exception(f'Unsupported network for Monnify: {network}')
-            
-            # Step 3: Find airtime product for this network
-            # Get billers for AIRTIME category
-            billers_response = call_monnify_bills_api(
-                f'billers?category_code=AIRTIME&size=100', 
-                'GET', 
-                access_token=access_token
-            )
-            
-            target_biller = None
-            for biller in billers_response['responseBody']['content']:
-                if biller['name'].upper() == monnify_network:
-                    target_biller = biller
-                    break
-            
-            if not target_biller:
-                raise Exception(f'Monnify biller not found for network: {network}')
-            
-            # Step 4: Get airtime products for this biller
-            products_response = call_monnify_bills_api(
-                f'biller-products?biller_code={target_biller["code"]}&size=100',
-                'GET',
-                access_token=access_token
-            )
-            
-            # Find airtime product (usually has "Top up" or "Airtime" in name)
-            airtime_product = None
-            for product in products_response['responseBody']['content']:
-                if 'airtime' in product['name'].lower() or 'top up' in product['name'].lower():
-                    airtime_product = product
-                    break
-            
-            if not airtime_product:
-                raise Exception(f'Monnify airtime product not found for {network}')
-            
-            print(f'📱 Using Monnify product: {airtime_product["name"]} (Code: {airtime_product["code"]})')
-            
-            # Step 5: Validate customer (phone number)
-            validation_data = {
-                'productCode': airtime_product['code'],
-                'customerId': phone_number
-            }
-            
-            validation_response = call_monnify_bills_api(
-                'validate-customer',
-                'POST',
-                validation_data,
-                access_token=access_token
-            )
-            
-            print(f'✅ Monnify customer validation successful for {phone_number}')
-            
-            # Step 6: Prepare vend request
-            vend_data = {
-                'productCode': airtime_product['code'],
-                'customerId': phone_number,
-                'amount': int(amount),
-                'reference': request_id,  # Use our unique request ID
-                'phoneNumber': phone_number,
-                'emailAddress': 'customer@ficoreafrica.com'  # Default email
-            }
-            
-            # Check if validation reference is required
-            vend_instruction = validation_response['responseBody'].get('vendInstruction', {})
-            if vend_instruction.get('requireValidationRef', False):
-                validation_ref = validation_response['responseBody'].get('validationReference')
-                if validation_ref:
-                    vend_data['validationReference'] = validation_ref
-                    print(f'🔐 Using validation reference: {validation_ref}')
-            
-            # Step 7: Execute vend (purchase)
-            vend_response = call_monnify_bills_api(
-                'vend',
-                'POST', 
-                vend_data,
-                access_token=access_token
-            )
-            
-            vend_result = vend_response['responseBody']
-            
-            if vend_result.get('vendStatus') == 'SUCCESS':
-                print(f'✅ Monnify airtime purchase successful: {vend_result["transactionReference"]}')
-                return {
-                    'success': True,
-                    'transactionReference': vend_result['transactionReference'],
-                    'vendReference': vend_result['vendReference'],
-                    'description': vend_result.get('description', 'Airtime purchase successful'),
-                    'provider': 'monnify',
-                    'vendAmount': vend_result.get('vendAmount', amount),
-                    'payableAmount': vend_result.get('payableAmount', amount),
-                    'commission': vend_result.get('commission', 0)
-                }
-            elif vend_result.get('vendStatus') == 'IN_PROGRESS':
-                # Poll for status
-                print(f'⏳ Monnify transaction in progress, checking status...')
-                import time
-                time.sleep(3)  # Wait 3 seconds
-                
-                requery_response = call_monnify_bills_api(
-                    f'requery?reference={request_id}',
-                    'GET',
-                    access_token=access_token
-                )
-                
-                final_result = requery_response['responseBody']
-                if final_result.get('vendStatus') == 'SUCCESS':
-                    print(f'✅ Monnify airtime purchase completed: {final_result["transactionReference"]}')
-                    return {
-                        'success': True,
-                        'transactionReference': final_result['transactionReference'],
-                        'vendReference': final_result['vendReference'],
-                        'description': final_result.get('description', 'Airtime purchase successful'),
-                        'provider': 'monnify',
-                        'vendAmount': final_result.get('vendAmount', amount),
-                        'payableAmount': final_result.get('payableAmount', amount),
-                        'commission': final_result.get('commission', 0)
-                    }
-                else:
-                    raise Exception(f'Monnify transaction failed: {final_result.get("description", "Unknown error")}')
-            else:
-                raise Exception(f'Monnify vend failed: {vend_result.get("description", "Unknown error")}')
-                
-        except Exception as e:
-            print(f'❌ Monnify airtime purchase failed: {str(e)}')
-            raise Exception(f'Monnify airtime failed: {str(e)}')
-    
-    def call_monnify_data(network, data_plan_code, phone_number, request_id):
-        """Call Monnify Bills API for data purchase"""
-        try:
-            # Step 1: Get access token
-            access_token = get_monnify_access_token()
-            
-            # Step 2: Map network to Monnify biller code
-            network_mapping = {
-                'MTN': 'MTN',
-                'AIRTEL': 'AIRTEL',
-                'GLO': 'GLO', 
-                '9MOBILE': '9MOBILE'
-            }
-            
-            monnify_network = network_mapping.get(network.upper())
-            if not monnify_network:
-                raise Exception(f'Unsupported network for Monnify: {network}')
-            
-            # Step 3: Find data biller for this network
-            billers_response = call_monnify_bills_api(
-                f'billers?category_code=DATA_BUNDLE&size=100',
-                'GET',
-                access_token=access_token
-            )
-            
-            target_biller = None
-            for biller in billers_response['responseBody']['content']:
-                if biller['name'].upper() == monnify_network:
-                    target_biller = biller
-                    break
-            
-            if not target_biller:
-                raise Exception(f'Monnify data biller not found for network: {network}')
-            
-            # Step 4: Get data products for this biller
-            products_response = call_monnify_bills_api(
-                f'biller-products?biller_code={target_biller["code"]}&size=200',
-                'GET',
-                access_token=access_token
-            )
-            
-            # Find matching data product by plan code or name
-            data_product = None
-            for product in products_response['responseBody']['content']:
-                # Try to match by code first, then by name patterns
-                if (product['code'] == data_plan_code or 
-                    data_plan_code in product.get('name', '') or
-                    any(keyword in product.get('name', '').lower() for keyword in ['data', 'gb', 'mb'])):
-                    data_product = product
-                    break
-            
-            if not data_product:
-                # Use first available data product as fallback
-                data_products = [p for p in products_response['responseBody']['content'] 
-                               if 'data' in p.get('name', '').lower()]
-                if data_products:
-                    data_product = data_products[0]
-                    print(f'⚠️ Using fallback data product: {data_product["name"]}')
-                else:
-                    raise Exception(f'No data products found for {network}')
-            
-            print(f'📊 Using Monnify data product: {data_product["name"]} (Code: {data_product["code"]})')
-            
-            # Step 5: Validate customer
-            validation_data = {
-                'productCode': data_product['code'],
-                'customerId': phone_number
-            }
-            
-            validation_response = call_monnify_bills_api(
-                'validate-customer',
-                'POST',
-                validation_data,
-                access_token=access_token
-            )
-            
-            print(f'✅ Monnify data customer validation successful for {phone_number}')
-            
-            # Step 6: Prepare vend request
-            vend_amount = data_product.get('price', 0)
-            if not vend_amount or vend_amount <= 0:
-                raise Exception(f'Invalid data product price: {vend_amount}')
-            
-            vend_data = {
-                'productCode': data_product['code'],
-                'customerId': phone_number,
-                'amount': vend_amount,
-                'reference': request_id,
-                'phoneNumber': phone_number,
-                'emailAddress': 'customer@ficoreafrica.com'
-            }
-            
-            # Check validation reference requirement
-            vend_instruction = validation_response['responseBody'].get('vendInstruction', {})
-            if vend_instruction.get('requireValidationRef', False):
-                validation_ref = validation_response['responseBody'].get('validationReference')
-                if validation_ref:
-                    vend_data['validationReference'] = validation_ref
-                    print(f'🔐 Using validation reference for data: {validation_ref}')
-            
-            # Step 7: Execute vend
-            vend_response = call_monnify_bills_api(
-                'vend',
-                'POST',
-                vend_data,
-                access_token=access_token
-            )
-            
-            vend_result = vend_response['responseBody']
-            
-            if vend_result.get('vendStatus') == 'SUCCESS':
-                print(f'✅ Monnify data purchase successful: {vend_result["transactionReference"]}')
-                return {
-                    'success': True,
-                    'transactionReference': vend_result['transactionReference'],
-                    'vendReference': vend_result['vendReference'],
-                    'description': vend_result.get('description', 'Data purchase successful'),
-                    'provider': 'monnify',
-                    'vendAmount': vend_result.get('vendAmount', vend_amount),
-                    'payableAmount': vend_result.get('payableAmount', vend_amount),
-                    'commission': vend_result.get('commission', 0),
-                    'productName': data_product['name']
-                }
-            elif vend_result.get('vendStatus') == 'IN_PROGRESS':
-                # Poll for status
-                print(f'⏳ Monnify data transaction in progress, checking status...')
-                import time
-                time.sleep(3)
-                
-                requery_response = call_monnify_bills_api(
-                    f'requery?reference={request_id}',
-                    'GET',
-                    access_token=access_token
-                )
-                
-                final_result = requery_response['responseBody']
-                if final_result.get('vendStatus') == 'SUCCESS':
-                    print(f'✅ Monnify data purchase completed: {final_result["transactionReference"]}')
-                    return {
-                        'success': True,
-                        'transactionReference': final_result['transactionReference'],
-                        'vendReference': final_result['vendReference'],
-                        'description': final_result.get('description', 'Data purchase successful'),
-                        'provider': 'monnify',
-                        'vendAmount': final_result.get('vendAmount', vend_amount),
-                        'payableAmount': final_result.get('payableAmount', vend_amount),
-                        'commission': final_result.get('commission', 0),
-                        'productName': data_product['name']
-                    }
-                else:
-                    raise Exception(f'Monnify data transaction failed: {final_result.get("description", "Unknown error")}')
-            else:
-                raise Exception(f'Monnify data vend failed: {vend_result.get("description", "Unknown error")}')
-                
-        except Exception as e:
-            print(f'❌ Monnify data purchase failed: {str(e)}')
-            raise Exception(f'Monnify data failed: {str(e)}')
-
-    # ==================== PEYFLEX API FUNCTIONS (FALLBACK) ====================
-    
-    def call_peyflex_airtime(network, amount, phone_number, request_id):
-        """Call Peyflex Airtime API with exact format from documentation"""
-        # Use the exact format from Peyflex documentation
-        payload = {
-            'network': network.lower(),  # Documentation shows lowercase: "mtn"
-            'amount': int(amount),
-            'mobile_number': phone_number
-            # NOTE: Do NOT send request_id - not shown in documentation example
-        }
-        
-        print(f'📤 Peyflex airtime purchase payload: {payload}')
-        print(f'📤 Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
-        
-        headers = {
-            'Authorization': f'Token {PEYFLEX_API_TOKEN}',  # Documentation shows "Token" not "Bearer"
-            'Content-Type': 'application/json',
-            'User-Agent': 'FiCore-Backend/1.0'
-        }
-        
-        url = f'{PEYFLEX_BASE_URL}/api/airtime/topup/'
-        print(f'📡 Calling Peyflex airtime API: {url}')
-        
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            
-            print(f'📥 Peyflex airtime response: {response.status_code}')
-            print(f'📥 Response body: {response.text[:500]}')
-            
-            if response.status_code == 200:
-                try:
-                    return response.json()
-                except Exception as json_error:
-                    print(f'❌ Error parsing Peyflex airtime response: {json_error}')
-                    raise Exception(f'Invalid response format from Peyflex: {json_error}')
-            elif response.status_code == 400:
-                print('🚨 Peyflex airtime API returned 400 Bad Request')
-                try:
-                    error_data = response.json()
-                    error_msg = error_data.get('message', response.text)
-                except:
-                    error_msg = response.text
-                raise Exception(f'Invalid airtime request: {error_msg}')
-            elif response.status_code == 403:
-                print('🚨 Peyflex airtime API returned 403 Forbidden')
-                print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
-                raise Exception('Airtime service access denied - check API credentials and account status')
-            elif response.status_code == 404:
-                print('🚨 Peyflex airtime API returned 404 Not Found')
-                raise Exception('Airtime endpoint not found - check API URL')
-            else:
-                print(f'🚨 Peyflex airtime API error: {response.status_code} - {response.text}')
-                raise Exception(f'Peyflex airtime API error: {response.status_code} - {response.text}')
-                
-        except requests.exceptions.ConnectionError as e:
-            print(f'❌ Connection error to Peyflex: {str(e)}')
-            raise Exception('Unable to connect to Peyflex servers - check network connectivity')
-        except requests.exceptions.Timeout as e:
-            print(f'❌ Timeout error to Peyflex: {str(e)}')
-            raise Exception('Peyflex API request timed out - try again later')
-        except Exception as e:
-            if 'Invalid response format' in str(e) or 'Invalid airtime request' in str(e) or 'access denied' in str(e):
-                raise  # Re-raise our custom exceptions
-            print(f'❌ Unexpected error calling Peyflex: {str(e)}')
-            raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
-    
-    def call_peyflex_data(network, data_plan_code, phone_number, request_id):
-        """Call Peyflex Data Purchase API with exact format from documentation"""
-        # Use the exact format from Peyflex documentation
-        payload = {
-            'network': network.lower(),  # Documentation shows lowercase network names
-            'plan_code': data_plan_code,  # Use plan_code as shown in docs
-            'mobile_number': phone_number
-            # NOTE: Do NOT send request_id - not shown in documentation example
-        }
-        
-        print(f'📤 Peyflex data purchase payload: {payload}')
-        print(f'📤 Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
-        
-        headers = {
-            'Authorization': f'Token {PEYFLEX_API_TOKEN}',  # Documentation shows "Token" not "Bearer"
-            'Content-Type': 'application/json',
-            'User-Agent': 'FiCore-Backend/1.0'
-        }
-        
-        url = f'{PEYFLEX_BASE_URL}/api/data/purchase/'
-        print(f'📡 Calling Peyflex data purchase API: {url}')
-        
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            
-            print(f'📥 Peyflex data purchase response: {response.status_code}')
-            print(f'📥 Response body: {response.text[:500]}')
-            
-            if response.status_code == 200:
-                try:
-                    return response.json()
-                except Exception as json_error:
-                    print(f'❌ Error parsing Peyflex data purchase response: {json_error}')
-                    raise Exception(f'Invalid response format from Peyflex: {json_error}')
-            elif response.status_code == 400:
-                print('🚨 Peyflex data purchase API returned 400 Bad Request')
-                try:
-                    error_data = response.json()
-                    error_msg = error_data.get('message', response.text)
-                except:
-                    error_msg = response.text
-                raise Exception(f'Invalid data purchase request: {error_msg}')
-            elif response.status_code == 403:
-                print('🚨 Peyflex data purchase API returned 403 Forbidden')
-                print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
-                raise Exception('Data purchase service access denied - check API credentials and account status')
-            elif response.status_code == 404:
-                print('🚨 Peyflex data purchase API returned 404 Not Found')
-                raise Exception('Data purchase endpoint not found - check API URL')
-            else:
-                print(f'🚨 Peyflex data purchase API error: {response.status_code} - {response.text}')
-                raise Exception(f'Peyflex data purchase API error: {response.status_code} - {response.text}')
-                
-        except requests.exceptions.ConnectionError as e:
-            print(f'❌ Connection error to Peyflex: {str(e)}')
-            raise Exception('Unable to connect to Peyflex servers - check network connectivity')
-        except requests.exceptions.Timeout as e:
-            print(f'❌ Timeout error to Peyflex: {str(e)}')
-            raise Exception('Peyflex API request timed out - try again later')
-        except Exception as e:
-            if 'Invalid response format' in str(e) or 'Invalid data purchase request' in str(e) or 'access denied' in str(e):
-                raise  # Re-raise our custom exceptions
-            print(f'❌ Unexpected error calling Peyflex: {str(e)}')
-            raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
-
-    # ==================== NETWORK AND PLANS ENDPOINTS ====================
-    
-    @vas_bp.route('/networks/airtime', methods=['GET'])
-    @token_required
-    def create_wallet(current_user):
-        """Create virtual account number (VAN) for user via Monnify"""
-        try:
-            user_id = str(current_user['_id'])
-            
-            existing_wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
-            if existing_wallet:
                 return jsonify({
                     'success': True,
-                    'data': serialize_doc(existing_wallet),
-                    'message': 'Wallet already exists'
+                    'data': default_networks,
+                    'message': 'Default airtime networks (providers unavailable)',
+                    'source': 'default'
                 }), 200
-            
-            auth_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v1/auth/login',
-                auth=(MONNIFY_API_KEY, MONNIFY_SECRET_KEY),
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            )
-            
-            if auth_response.status_code != 200:
-                raise Exception(f'Monnify auth failed: {auth_response.text}')
-            
-            access_token = auth_response.json()['responseBody']['accessToken']
-            
-            account_data = {
-                'accountReference': f'FICORE_{user_id}',
-                'accountName': f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()[:50],  # Monnify 50-char limit
-                'currencyCode': 'NGN',
-                'contractCode': MONNIFY_CONTRACT_CODE,
-                'customerEmail': current_user.get('email', ''),
-                'customerName': f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()[:50],  # Monnify 50-char limit
-                'getAllAvailableBanks': True
-            }
-            
-            van_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=account_data,
-                timeout=30
-            )
-            
-            if van_response.status_code != 200:
-                raise Exception(f'VAN creation failed: {van_response.text}')
-            
-            van_data = van_response.json()['responseBody']
-            
-            wallet = {
-                '_id': ObjectId(),
-                'userId': ObjectId(user_id),
-                'balance': 0.0,
-                'accountReference': van_data['accountReference'],
-                'accountName': van_data['accountName'],
-                'accounts': van_data['accounts'],
-                'status': 'active',
-                'createdAt': datetime.utcnow(),
-                'updatedAt': datetime.utcnow()
-            }
-            
-            mongo.db.vas_wallets.insert_one(wallet)
-            
-            return jsonify({
-                'success': True,
-                'data': serialize_doc(wallet),
-                'message': 'Wallet created successfully'
-            }), 201
-            
+                
         except Exception as e:
-            print(f'❌ Error creating wallet: {str(e)}')
+            print(f'❌ Error fetching airtime networks: {str(e)}')
             return jsonify({
                 'success': False,
-                'message': 'Failed to create wallet',
+                'message': 'Failed to fetch airtime networks',
                 'errors': {'general': [str(e)]}
-            }), 500
-    
-    @vas_bp.route('/wallet/balance', methods=['GET'])
-    @token_required
-    def get_wallet_balance(current_user):
-        """Get user's wallet balance"""
-        try:
-            user_id = str(current_user['_id'])
-            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
-            
-            if not wallet:
-                return jsonify({
-                    'success': False,
-                    'message': 'Wallet not found. Please create a wallet first.'
-                }), 404
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'balance': wallet.get('balance', 0.0),
-                    'accounts': wallet.get('accounts', []),
-                    'accountName': wallet.get('accountName', ''),
-                    'status': wallet.get('status', 'active')
-                },
-                'message': 'Wallet balance retrieved successfully'
-            }), 200
-            
-        except Exception as e:
-            print(f'❌ Error getting wallet balance: {str(e)}')
-            return jsonify({
-                'success': False,
-                'message': 'Failed to retrieve wallet balance',
-                'errors': {'general': [str(e)]}
-            }), 500
-    
-    # ==================== ELIGIBILITY & KYC ENDPOINTS ====================
-    
-    @vas_bp.route('/check-eligibility', methods=['GET'])
-    @token_required
-    def check_eligibility_endpoint(current_user):
-        """Check if user is eligible for dedicated account (Path B)"""
-        try:
-            user_id = str(current_user['_id'])
-            eligible, reason = check_eligibility(user_id)
-            progress = get_eligibility_progress(user_id)
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'eligible': eligible,
-                    'reason': reason,
-                    'progress': progress
-                },
-                'message': 'Eligibility checked successfully'
-            }), 200
-            
-        except Exception as e:
-            print(f'❌ Error checking eligibility: {str(e)}')
-            return jsonify({
-                'success': False,
-                'message': 'Failed to check eligibility',
-                'errors': {'general': [str(e)]}
-            }), 500
-    
-    @vas_bp.route('/check-existing-bvn-nin', methods=['POST'])
-    @token_required
-    def check_existing_bvn_nin(current_user):
-        """
-        Check if BVN or NIN already exists in the database
-        """
-        try:
-            data = request.json
-            bvn = data.get('bvn', '').strip()
-            nin = data.get('nin', '').strip()
-            
-            # Validate input
-            if len(bvn) != 11 or not bvn.isdigit():
-                return jsonify({
-                    'success': False,
-                    'exists': False,
-                    'message': 'Invalid BVN format'
-                }), 400
-            
-            if len(nin) != 11 or not nin.isdigit():
-                return jsonify({
-                    'success': False,
-                    'exists': False,
-                    'message': 'Invalid NIN format'
-                }), 400
-            
-            # Check if BVN exists in any wallet
-            bvn_exists = mongo.db.vas_wallets.find_one({
-                'bvn': bvn,
-                'status': 'ACTIVE'
-            })
-            
-            # Check if NIN exists in any wallet
-            nin_exists = mongo.db.vas_wallets.find_one({
-                'nin': nin,
-                'status': 'ACTIVE'
-            })
-            
-            # Also check in user profiles
-            bvn_in_profile = mongo.db.users.find_one({
-                'bvn': bvn
-            })
-            
-            nin_in_profile = mongo.db.users.find_one({
-                'nin': nin
-            })
-            
-            exists = bool(bvn_exists or nin_exists or bvn_in_profile or nin_in_profile)
-            
-            if exists:
-                message = 'This BVN or NIN has already been used for account creation.'
-            else:
-                message = 'BVN and NIN are available for use.'
-            
-            return jsonify({
-                'success': True,
-                'exists': exists,
-                'message': message,
-                'details': {
-                    'bvn_in_wallet': bool(bvn_exists),
-                    'nin_in_wallet': bool(nin_exists),
-                    'bvn_in_profile': bool(bvn_in_profile),
-                    'nin_in_profile': bool(nin_in_profile)
-                }
-            }), 200
-            
-        except Exception as e:
-            print(f'ERROR: Error checking existing BVN/NIN: {str(e)}')
-            return jsonify({
-                'success': False,
-                'exists': False,
-                'message': 'Error checking records',
-                'error': str(e)
             }), 500
 
     @vas_bp.route('/verify-bvn', methods=['POST'])
@@ -2185,38 +869,18 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             
             # Create dedicated account immediately using Monnify account creation (not verification)
             # This is the original working approach - send BVN directly to create account
-            access_token = call_monnify_auth()
-            
-            account_data = {
-                'accountReference': f'FICORE_{user_id}',
-                'accountName': user_name[:50],  # Monnify 50-char limit
-                'currencyCode': 'NGN',
-                'contractCode': MONNIFY_CONTRACT_CODE,
-                'customerEmail': user_email,
-                'customerName': user_name[:50],  # Monnify 50-char limit
-                'bvn': bvn,
-                'nin': nin,
-                'getAllAvailableBanks': True  # Get all available banks for user choice
-            }
-            
             print(f"🏦 Creating Monnify reserved account with BVN: {bvn[:3]}***{bvn[-3:]}")
             
-            van_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=account_data,
-                timeout=30
-            )
+            monnify_response = call_monnify_auth(bvn, nin, phone_number, user_name)
             
-            if van_response.status_code != 200:
-                print(f"❌ Monnify account creation failed: {van_response.status_code} - {van_response.text}")
-                raise Exception(f'Reserved account creation failed: {van_response.text}')
+            # Extract account details from Monnify response
+            accounts = monnify_response.get('accounts', [])
+            if not accounts:
+                raise Exception("No accounts returned from Monnify")
             
-            van_data = van_response.json()['responseBody']
-            print(f"✅ Monnify account created successfully with {len(van_data.get('accounts', []))} banks")
+            primary_account = accounts[0]  # Use first account as primary
+            
+            print(f"✅ Monnify account created successfully with {len(accounts)} banks")
             
             # Update user profile with verified information
             profile_update = {
@@ -2246,9 +910,9 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 '_id': ObjectId(),
                 'userId': ObjectId(user_id),
                 'balance': 0.0,
-                'accountReference': van_data['accountReference'],
-                'contractCode': van_data['contractCode'],
-                'accounts': van_data['accounts'],
+                'accountReference': monnify_response.get('accountReference'),
+                'contractCode': monnify_response.get('contractCode'),
+                'accounts': accounts,
                 'status': 'ACTIVE',
                 'tier': 'TIER_2',  # Full KYC verified account
                 'kycVerified': True,
@@ -2260,17 +924,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }
             
             mongo.db.vas_wallets.insert_one(wallet_data)
-            
-            # Update user profile with provided phone number
-            profile_update = {
-                'phone': phone_number,  # Save phone number to profile
-                'updatedAt': datetime.utcnow()
-            }
-            
-            # Update user profile
-            mongo.db.users.update_one(
-                {'_id': ObjectId(user_id)},
-                {'$set': profile_update}
             )
             
             # Record business expense for account creation (business absorbs verification costs)
@@ -2299,22 +952,22 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             return jsonify({
                 'success': True,
                 'data': {
-                    'accounts': van_data['accounts'],  # All available bank accounts
-                    'accountReference': van_data['accountReference'],
-                    'contractCode': van_data['contractCode'],
+                    'accounts': accounts,  # All available bank accounts
+                    'accountReference': monnify_response.get('accountReference'),
+                    'contractCode': monnify_response.get('contractCode'),
                     'tier': 'TIER_2',
                     'kycVerified': True,
                     'verifiedName': user_name,
                     'createdAt': wallet_data['createdAt'].isoformat() + 'Z',
                     # Keep backward compatibility - return first account as default
                     'defaultAccount': {
-                        'accountNumber': van_data['accounts'][0].get('accountNumber', '') if van_data['accounts'] else '',
-                        'accountName': van_data['accounts'][0].get('accountName', '') if van_data['accounts'] else '',
-                        'bankName': van_data['accounts'][0].get('bankName', 'Wema Bank') if van_data['accounts'] else 'Wema Bank',
-                        'bankCode': van_data['accounts'][0].get('bankCode', '035') if van_data['accounts'] else '035',
+                        'accountNumber': primary_account.get('accountNumber', ''),
+                        'accountName': primary_account.get('accountName', ''),
+                        'bankName': primary_account.get('bankName', 'Wema Bank'),
+                        'bankCode': primary_account.get('bankCode', '035'),
                     }
                 },
-                'message': f'Account created successfully with {len(van_data["accounts"])} available banks!'
+                'message': f'Account created successfully with {len(accounts)} available banks!'
             }), 201
             
         except Exception as e:
@@ -2421,43 +1074,25 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 }), 400
             
             # Create reserved account with BVN and NIN (reuse existing wallet creation logic)
-            access_token = call_monnify_auth()
+            phone_number = verification.get('phoneNumber', current_user.get('phoneNumber', ''))
+            user_name = verification['verifiedName']
+            monnify_response = call_monnify_auth(verification['bvn'], verification['nin'], phone_number, user_name)
             
-            account_data = {
-                'accountReference': f'FICORE_{user_id}',
-                'accountName': verification['verifiedName'][:50],  # Monnify 50-char limit
-                'currencyCode': 'NGN',
-                'contractCode': MONNIFY_CONTRACT_CODE,
-                'customerEmail': current_user.get('email', ''),
-                'customerName': verification['verifiedName'][:50],  # Monnify 50-char limit
-                'bvn': verification['bvn'],
-                'nin': verification['nin'],  # Include NIN for full Tier 2 compliance
-                'getAllAvailableBanks': True  # Moniepoint default, user choice
-            }
+            # Extract account details from Monnify response
+            accounts = monnify_response.get('accounts', [])
+            if not accounts:
+                raise Exception("No accounts returned from Monnify")
             
-            van_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=account_data,
-                timeout=30
-            )
-            
-            if van_response.status_code != 200:
-                raise Exception(f'Reserved account creation failed: {van_response.text}')
-            
-            van_data = van_response.json()['responseBody']
+            print(f"✅ Monnify account created successfully with {len(accounts)} banks")
             
             # Create wallet with KYC info (BVN + NIN for full Tier 2)
             wallet = {
                 '_id': ObjectId(),
                 'userId': ObjectId(user_id),
                 'balance': 0.0,
-                'accountReference': van_data['accountReference'],
-                'accountName': van_data['accountName'],
-                'accounts': van_data['accounts'],
+                'accountReference': monnify_response.get('accountReference'),
+                'accountName': monnify_response.get('accountName'),
+                'accounts': accounts,
                 'kycStatus': 'verified',
                 'kycTier': 2,  # Full Tier 2 compliance with BVN + NIN
                 'bvnVerified': True,
@@ -3700,911 +2335,46 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                     print(f'📥 Peyflex networks response status: {response.status_code}')
                     
                     if response.status_code == 200:
-                        try:
-                            data = response.json()
-                            print(f'📊 Peyflex response: {data}')
+                        peyflex_data = response.json()
+                        if peyflex_data.get('success'):
+                            networks = peyflex_data.get('data', [])
                             
-                            # Handle the correct response format from documentation
-                            networks_list = []
-                            if isinstance(data, dict):
-                                if 'networks' in data:
-                                    networks_list = data['networks']
-                                    print(f'✅ Found {len(networks_list)} networks in response.networks')
-                                elif 'data' in data:
-                                    networks_list = data['data']
-                                    print(f'✅ Found {len(networks_list)} networks in response.data')
-                                else:
-                                    print(f'⚠️ Dict response without networks/data key: {list(data.keys())}')
-                                    networks_list = []
-                            elif isinstance(data, list):
-                                networks_list = data
-                                print(f'✅ Direct array with {len(networks_list)} networks')
-                            else:
-                                print(f'⚠️ Unexpected response format: {data}')
-                                networks_list = []
-                            
-                            # Transform to our format
-                            transformed_networks = []
-                            for network in networks_list:
-                                if not isinstance(network, dict):
-                                    print(f'⚠️ Skipping non-dict network: {network}')
-                                    continue
-                                    
-                                network_data = {
-                                    'id': network.get('identifier', network.get('id', network.get('code', ''))),
-                                    'name': network.get('name', network.get('label', 'Unknown Network')),
-                                    'source': 'peyflex'
-                                }
-                                
-                                # Only add networks with valid data
-                                if network_data['id'] and network_data['name']:
-                                    transformed_networks.append(network_data)
-                                else:
-                                    print(f'⚠️ Skipping invalid network: {network}')
-                            
-                            print(f'✅ Successfully transformed {len(transformed_networks)} valid networks from Peyflex')
-                            
-                            if len(transformed_networks) > 0:
-                                return jsonify({
-                                    'success': True,
-                                    'data': transformed_networks,
-                                    'message': 'Data networks retrieved from Peyflex (fallback)',
-                                    'source': 'peyflex_fallback'
-                                }), 200
-                            else:
-                                print('⚠️ No valid networks found in Peyflex response')
-                                # Fall through to emergency fallback
-                                
-                        except Exception as json_error:
-                            print(f'❌ Error parsing Peyflex networks response: {json_error}')
-                            print(f'📄 Raw response: {response.text}')
-                            # Fall through to emergency fallback
+                            print(f'✅ Successfully retrieved {len(networks)} data networks from Peyflex')
+                            return jsonify({
+                                'success': True,
+                                'data': networks,
+                                'message': 'Data networks retrieved from Peyflex (fallback)',
+                                'source': 'peyflex'
+                            }), 200
                     
-                    elif response.status_code == 403:
-                        print('🚨 Peyflex networks API returned 403 Forbidden')
-                        print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
-                        # Fall through to emergency fallback
+                    print(f'⚠️ Peyflex data networks failed with status: {response.status_code}')
                     
-                    else:
-                        print(f'🚨 Peyflex networks API error: {response.status_code} - {response.text}')
-                        # Fall through to emergency fallback
-                        
-                except requests.exceptions.ConnectionError as e:
-                    print(f'❌ Connection error to Peyflex: {str(e)}')
-                    # Fall through to emergency fallback
-                except requests.exceptions.Timeout as e:
-                    print(f'❌ Timeout error to Peyflex: {str(e)}')
-                    # Fall through to emergency fallback
-            
-        except Exception as e:
-            print(f'❌ Error getting data networks from both providers: {str(e)}')
-        
-        # Emergency fallback data networks
-        print('🔄 Using emergency fallback data networks')
-        fallback_networks = [
-            {'id': 'mtn', 'name': 'MTN', 'source': 'fallback'},
-            {'id': 'airtel', 'name': 'Airtel', 'source': 'fallback'},
-            {'id': 'glo', 'name': 'Glo', 'source': 'fallback'},
-            {'id': '9mobile', 'name': '9mobile', 'source': 'fallback'}
-        ]
-        
-        return jsonify({
-            'success': True,
-            'data': fallback_networks,
-            'message': 'Emergency fallback data networks (both providers unavailable)',
-            'emergency': True
-        }), 200
-
-    # ==================== DATA PLANS ENDPOINT ====================
-    
-    @vas_bp.route('/data-plans/<network>', methods=['GET'])
-    @token_required
-    def get_data_plans(current_user, network):
-        """Get data plans for a specific network from Monnify Bills API (primary) with Peyflex fallback"""
-        try:
-            print(f'🔍 Fetching data plans for network: {network}')
-            
-            # Try Monnify first
-            try:
-                access_token = get_monnify_access_token()
+                except Exception as peyflex_error:
+                    print(f'⚠️ Peyflex data networks error: {str(peyflex_error)}')
                 
-                # Map network to Monnify biller code
-                network_mapping = {
-                    'mtn': 'MTN',
-                    'airtel': 'AIRTEL',
-                    'glo': 'GLO',
-                    '9mobile': '9MOBILE'
-                }
+                # If both fail, return default networks
+                default_networks = [
+                    {'id': 'mtn', 'name': 'MTN', 'code': 'MTN', 'source': 'default'},
+                    {'id': 'glo', 'name': 'Glo', 'code': 'GLO', 'source': 'default'},
+                    {'id': 'airtel', 'name': 'Airtel', 'code': 'AIRTEL', 'source': 'default'},
+                    {'id': '9mobile', 'name': '9mobile', 'code': '9MOBILE', 'source': 'default'}
+                ]
                 
-                monnify_network = network_mapping.get(network.lower())
-                if not monnify_network:
-                    raise Exception(f'Network {network} not supported by Monnify')
-                
-                # Get billers for DATA_BUNDLE category
-                billers_response = call_monnify_bills_api(
-                    f'billers?category_code=DATA_BUNDLE&size=100',
-                    'GET',
-                    access_token=access_token
-                )
-                
-                # Find the target biller
-                target_biller = None
-                for biller in billers_response['responseBody']['content']:
-                    if biller['name'].upper() == monnify_network:
-                        target_biller = biller
-                        break
-                
-                if not target_biller:
-                    raise Exception(f'Monnify biller not found for network: {network}')
-                
-                # Get data products for this biller
-                products_response = call_monnify_bills_api(
-                    f'biller-products?biller_code={target_biller["code"]}&size=200',
-                    'GET',
-                    access_token=access_token
-                )
-                
-                # Transform Monnify products to our format
-                plans = []
-                for product in products_response['responseBody']['content']:
-                    # Filter for data products
-                    if 'data' in product.get('name', '').lower() or 'gb' in product.get('name', '').lower() or 'mb' in product.get('name', '').lower():
-                        plan = {
-                            'id': product['code'],
-                            'name': product['name'],
-                            'price': product.get('price', 0),
-                            'plan_code': product['code'],
-                            'source': 'monnify',
-                            'priceType': product.get('priceType', 'FIXED'),
-                            'minAmount': product.get('minAmount'),
-                            'maxAmount': product.get('maxAmount')
-                        }
-                        
-                        # Extract data volume and duration from metadata if available
-                        metadata = product.get('metadata', {})
-                        if metadata:
-                            plan['volume'] = metadata.get('volume', 0)
-                            plan['duration'] = metadata.get('duration', 30)
-                            plan['durationUnit'] = metadata.get('durationUnit', 'MONTHLY')
-                        
-                        plans.append(plan)
-                
-                if plans:
-                    print(f'✅ Successfully retrieved {len(plans)} data plans from Monnify for {network}')
-                    return jsonify({
-                        'success': True,
-                        'data': plans,
-                        'message': f'Data plans for {network.upper()} from Monnify Bills API',
-                        'source': 'monnify_bills',
-                        'network': network
-                    }), 200
-                else:
-                    raise Exception(f'No data plans found for {network} on Monnify')
-                
-            except Exception as monnify_error:
-                print(f'⚠️ Monnify data plans failed for {network}: {str(monnify_error)}')
-                
-                # Fallback to Peyflex
-                print(f'🔄 Falling back to Peyflex for {network} data plans')
-                
-                # Validate network ID format - Peyflex uses specific network identifiers
-                network_lower = network.lower().strip()
-                
-                # Known working networks based on Peyflex API discovery
-                known_networks = {
-                    'mtn': 'mtn_gifting_data',  # Map simple names to full IDs
-                    'mtn_gifting': 'mtn_gifting_data',
-                    'mtn_sme': 'mtn_sme_data',
-                    'airtel': 'airtel_data',
-                    'glo': 'glo_data',
-                    '9mobile': '9mobile_data'
-                }
-                
-                # Use full network ID if available
-                if network_lower in known_networks:
-                    full_network_id = known_networks[network_lower]
-                    print(f'📝 Mapped {network} to {full_network_id}')
-                else:
-                    full_network_id = network_lower
-                    print(f'📝 Using network ID as-is: {full_network_id}')
-                
-                headers = {
-                    'Authorization': f'Token {PEYFLEX_API_TOKEN}',
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'FiCore-Backend/1.0'
-                }
-                
-                url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={full_network_id}'
-                print(f'📡 Calling Peyflex plans API: {url}')
-                
-                try:
-                    response = requests.get(url, headers=headers, timeout=30)
-                    print(f'📥 Peyflex plans response status: {response.status_code}')
-                    print(f'📥 Response preview: {response.text[:500]}')
-                    
-                    if response.status_code == 200:
-                        try:
-                            data = response.json()
-                            print(f'📊 Peyflex plans response type: {type(data)}')
-                            
-                            # Handle the correct response format from documentation
-                            plans_list = []
-                            if isinstance(data, dict):
-                                if 'plans' in data:
-                                    plans_list = data['plans']
-                                    print(f'✅ Found {len(plans_list)} plans in response.plans')
-                                elif 'data' in data:
-                                    plans_list = data['data']
-                                    print(f'✅ Found {len(plans_list)} plans in response.data')
-                                else:
-                                    print(f'⚠️ Dict response without plans/data key: {list(data.keys())}')
-                                    # Try to use the dict itself if it looks like a plan
-                                    if 'plan_code' in data or 'amount' in data:
-                                        plans_list = [data]
-                                    else:
-                                        plans_list = []
-                            elif isinstance(data, list):
-                                plans_list = data
-                                print(f'✅ Direct array with {len(plans_list)} plans')
-                            else:
-                                print(f'⚠️ Unexpected response format: {data}')
-                                plans_list = []
-                            
-                            # Transform to our format
-                            transformed_plans = []
-                            for plan in plans_list:
-                                if not isinstance(plan, dict):
-                                    print(f'⚠️ Skipping non-dict plan: {plan}')
-                                    continue
-                                    
-                                transformed_plan = {
-                                    'id': plan.get('plan_code', plan.get('id', '')),
-                                    'name': plan.get('label', plan.get('name', plan.get('plan_name', 'Unknown Plan'))),
-                                    'price': float(plan.get('amount', plan.get('price', 0))),
-                                    'validity': plan.get('validity', plan.get('duration', 30)),  # Default 30 days
-                                    'plan_code': plan.get('plan_code', plan.get('id', '')),
-                                    'source': 'peyflex'
-                                }
-                                
-                                # Only add plans with valid data
-                                if transformed_plan['id'] and transformed_plan['price'] > 0:
-                                    transformed_plans.append(transformed_plan)
-                                else:
-                                    print(f'⚠️ Skipping invalid plan: {plan}')
-                            
-                            print(f'✅ Successfully transformed {len(transformed_plans)} valid plans from Peyflex')
-                            
-                            if len(transformed_plans) > 0:
-                                return jsonify({
-                                    'success': True,
-                                    'data': transformed_plans,
-                                    'message': f'Data plans for {network.upper()} from Peyflex (fallback)',
-                                    'source': 'peyflex_fallback',
-                                    'network_id': full_network_id
-                                }), 200
-                            else:
-                                print(f'⚠️ No valid plans found for {full_network_id}')
-                                # Fall through to emergency fallback
-                                
-                        except Exception as json_error:
-                            print(f'❌ Error parsing Peyflex plans response: {json_error}')
-                            print(f'📄 Raw response: {response.text}')
-                            # Fall through to emergency fallback
-                    
-                    elif response.status_code == 404:
-                        print(f'🚨 Network {full_network_id} not found on Peyflex (404)')
-                        # Fall through to emergency fallback
-                    
-                    elif response.status_code == 403:
-                        print(f'🚨 Peyflex plans API returned 403 Forbidden')
-                        print('🔍 This usually means: API token invalid, account not activated, or IP not whitelisted')
-                        # Fall through to emergency fallback
-                    
-                    else:
-                        print(f'🚨 Peyflex plans API error: {response.status_code} - {response.text}')
-                        # Fall through to emergency fallback
-                        
-                except requests.exceptions.ConnectionError as e:
-                    print(f'❌ Connection error to Peyflex: {str(e)}')
-                    # Fall through to emergency fallback
-                except requests.exceptions.Timeout as e:
-                    print(f'❌ Timeout error to Peyflex: {str(e)}')
-                    # Fall through to emergency fallback
-                except Exception as e:
-                    print(f'❌ Unexpected error calling Peyflex: {str(e)}')
-                    # Fall through to emergency fallback
-            
-        except Exception as e:
-            print(f'❌ Error in get_data_plans: {str(e)}')
-        
-        # Return emergency fallback plans
-        print(f'🔄 Using emergency fallback plans for {network}')
-        emergency_plans = _get_fallback_data_plans(network)
-        return jsonify({
-                'success': True,
-                'data': emergency_plans,
-                'message': f'Emergency data plans for {network.upper()} (both providers unavailable)',
-                'emergency': True
-            }), 200
-
-    def _get_fallback_data_plans(network):
-        """Get emergency fallback data plans when all providers fail"""
-        network_upper = network.upper()
-        network_lower = network.lower()
-        return [
-            {
-                'id': f'{network_lower}_1gb',
-                'name': f'{network_upper} 1GB - 30 Days',
-                'price': 500,
-                'validity': 30,
-                'plan_code': f'{network_lower}_1gb',
-                'source': 'emergency_fallback'
-            },
-            {
-                'id': f'{network_lower}_2gb', 
-                'name': f'{network_upper} 2GB - 30 Days',
-                'price': 1000,
-                'validity': 30,
-                'plan_code': f'{network_lower}_2gb',
-                'source': 'emergency_fallback'
-            }
-        ]
-    
-    def get_transaction_display_info(txn):
-        """Generate user-friendly description and category for VAS transactions"""
-        txn_type = txn.get('type', 'UNKNOWN').upper()
-        bill_category = txn.get('billCategory', '').lower()
-        provider = txn.get('provider', '')
-        bill_provider = txn.get('billProvider', '')
-        amount = txn.get('amount', 0)
-        phone_number = txn.get('phoneNumber', '')
-        plan_name = txn.get('planName', '')
-        account_number = txn.get('accountNumber', '')
-        
-        # Generate description and category based on transaction type
-        if txn_type == 'AIRTIME_PURCHASE':
-            description = f"Airtime purchase ₦{amount:,.2f}"
-            if phone_number:
-                masked_phone = phone_number[-4:] + '****' if len(phone_number) > 4 else phone_number
-                description = f"Airtime ₦{amount:,.2f} sent to {masked_phone}"
-            category = "Utilities"
-            
-        elif txn_type == 'DATA_PURCHASE':
-            description = f"Data purchase ₦{amount:,.2f}"
-            if plan_name and phone_number:
-                masked_phone = phone_number[-4:] + '****' if len(phone_number) > 4 else phone_number
-                description = f"{plan_name} for {masked_phone}"
-            elif phone_number:
-                masked_phone = phone_number[-4:] + '****' if len(phone_number) > 4 else phone_number
-                description = f"Data ₦{amount:,.2f} for {masked_phone}"
-            category = "Utilities"
-            
-        elif txn_type == 'WALLET_FUNDING':
-            description = f"Wallet funded ₦{amount:,.2f}"
-            category = "Transfer"
-            
-        elif txn_type == 'BILL':
-            # Handle bill payments based on category
-            if bill_category == 'electricity':
-                description = f"Electricity bill ₦{amount:,.2f}"
-                if bill_provider:
-                    description = f"Electricity bill ₦{amount:,.2f} - {bill_provider}"
-                category = "Utilities"
-                
-            elif bill_category == 'cable_tv':
-                description = f"Cable TV subscription ₦{amount:,.2f}"
-                if bill_provider:
-                    description = f"Cable TV ₦{amount:,.2f} - {bill_provider}"
-                category = "Entertainment"
-                
-            elif bill_category == 'internet':
-                description = f"Internet subscription ₦{amount:,.2f}"
-                if bill_provider:
-                    description = f"Internet ₦{amount:,.2f} - {bill_provider}"
-                category = "Utilities"
-                
-            elif bill_category == 'transportation':
-                description = f"Transportation payment ₦{amount:,.2f}"
-                if bill_provider:
-                    description = f"Transportation ₦{amount:,.2f} - {bill_provider}"
-                category = "Transportation"
-                
-            else:
-                description = f"Bill payment ₦{amount:,.2f}"
-                if bill_provider:
-                    description = f"Bill payment ₦{amount:,.2f} - {bill_provider}"
-                category = "Utilities"
-                
-        elif txn_type in ['BVN_VERIFICATION', 'NIN_VERIFICATION']:
-            verification_type = 'BVN' if txn_type == 'BVN_VERIFICATION' else 'NIN'
-            description = f"{verification_type} verification ₦{amount:,.2f}"
-            category = "Services"
-            
-        else:
-            # Fallback for unknown types
-            clean_type = txn_type.replace('_', ' ').title()
-            description = f"{clean_type} ₦{amount:,.2f}"
-            category = "Services"
-            
-        return description, category
-
-    # ==================== TRANSACTION ENDPOINTS ====================
-    
-    @vas_bp.route('/transactions/all', methods=['GET'])
-    @token_required
-    def get_all_user_transactions(current_user):
-        """Get all user transactions (VAS + Income + Expenses) in unified chronological order"""
-        try:
-            user_id = str(current_user['_id'])
-            limit = int(request.args.get('limit', 50))
-            skip = int(request.args.get('skip', 0))
-            
-            all_transactions = []
-            
-            # ────────────────────────────────────────────────────────────────
-            # 1. VAS Transactions - strict type filter
-            # ────────────────────────────────────────────────────────────────
-            vas_query = {
-                'userId': ObjectId(user_id),
-                'type': {
-                    '$in': [
-                        'AIRTIME', 'DATA', 'BILL', 'WALLET_FUNDING',
-                        'REFUND_CORRECTION', 'FEE_REFUND', 'KYC_VERIFICATION',
-                        'ACTIVATION_FEE', 'SUBSCRIPTION_FEE'
-                    ]
-                }
-            }
-            vas_cursor = mongo.db.vas_transactions.find(vas_query).sort('createdAt', -1)
-            vas_transactions = list(vas_cursor)
-            print(f"[VAS] Found {len(vas_transactions)} records for user {user_id}")
-            
-            for txn in vas_transactions:
-                description, category = get_transaction_display_info(txn)
-                created_at = txn.get('createdAt')
-                if not isinstance(created_at, datetime):
-                    created_at = datetime.utcnow()
-                    print(f"[VAS WARN] Invalid createdAt for txn {txn['_id']} - using now")
-                
-                all_transactions.append({
-                    '_id': str(txn['_id']),
-                    'type': 'VAS',
-                    'subtype': txn.get('type', 'UNKNOWN'),
-                    'amount': txn.get('amount', 0),
-                    'amountPaid': txn.get('amountPaid', 0),
-                    'fee': txn.get('depositFee', 0),
-                    'description': description,
-                    'reference': txn.get('reference', ''),
-                    'status': txn.get('status', 'UNKNOWN'),
-                    'provider': txn.get('provider', ''),
-                    'createdAt': created_at.isoformat() + 'Z',
-                    'date': created_at.isoformat() + 'Z',
-                    'category': category,
-                    'metadata': {
-                        'phoneNumber': txn.get('phoneNumber', ''),
-                        'planName': txn.get('planName', ''),
-                    }
-                })
-            
-            # ────────────────────────────────────────────────────────────────
-            # 2. Income Transactions
-            # ────────────────────────────────────────────────────────────────
-            income_cursor = mongo.db.incomes.find({'userId': ObjectId(user_id)}).sort('createdAt', -1)
-            income_transactions = list(income_cursor)
-            print(f"[INCOME] Found {len(income_transactions)} records for user {user_id}")
-            
-            for txn in income_transactions:
-                created_at = txn.get('createdAt')
-                if not isinstance(created_at, datetime):
-                    created_at = datetime.utcnow()
-                    print(f"[INCOME WARN] Invalid createdAt for income {txn['_id']} - using now")
-                
-                all_transactions.append({
-                    '_id': str(txn['_id']),
-                    'type': 'INCOME',
-                    'subtype': 'INCOME',
-                    'amount': txn.get('amount', 0),
-                    'description': txn.get('description', 'Income received'),
-                    'title': txn.get('source', 'Income'),
-                    'source': txn.get('source', 'Unknown'),
-                    'reference': '',
-                    'status': 'SUCCESS',
-                    'createdAt': created_at.isoformat() + 'Z',
-                    'date': created_at.isoformat() + 'Z',
-                    'category': txn.get('category', 'Income')
-                })
-            
-            # ────────────────────────────────────────────────────────────────
-            # 3. Expense Transactions
-            # ────────────────────────────────────────────────────────────────
-            expense_cursor = mongo.db.expenses.find({'userId': ObjectId(user_id)}).sort('createdAt', -1)
-            expense_transactions = list(expense_cursor)
-            print(f"[EXPENSE] Found {len(expense_transactions)} records for user {user_id}")
-            
-            for txn in expense_transactions:
-                created_at = txn.get('createdAt')
-                if not isinstance(created_at, datetime):
-                    created_at = datetime.utcnow()
-                    print(f"[EXPENSE WARN] Invalid createdAt for expense {txn['_id']} - using now")
-                
-                all_transactions.append({
-                    '_id': str(txn['_id']),
-                    'type': 'EXPENSE',
-                    'subtype': 'EXPENSE',
-                    'amount': -txn.get('amount', 0),
-                    'description': txn.get('description', 'Expense recorded'),
-                    'title': txn.get('title', 'Expense'),
-                    'reference': '',
-                    'status': 'SUCCESS',
-                    'createdAt': created_at.isoformat() + 'Z',
-                    'date': created_at.isoformat() + 'Z',
-                    'category': txn.get('category', 'Expense')
-                })
-            
-            # ────────────────────────────────────────────────────────────────
-            # Final sort (newest first) + pagination
-            # ────────────────────────────────────────────────────────────────
-            all_transactions.sort(key=lambda x: x['createdAt'], reverse=True)
-            paginated = all_transactions[skip:skip + limit]
-            
-            print(f"[SUMMARY] Total: {len(all_transactions)} | Paginated: {len(paginated)}")
-            if paginated:
-                types = [t['type'] for t in paginated[:5]]
-                print(f"[SUMMARY] First 5 types: {types}")
-            
-            return jsonify({
-                'success': True,
-                'data': paginated,
-                'total': len(all_transactions),
-                'limit': limit,
-                'skip': skip,
-                'message': 'All transactions loaded successfully'
-            }), 200
-            
-        except Exception as e:
-            print(f"[ERROR] /vas/transactions/all failed: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            return jsonify({
-                'success': False,
-                'message': 'Failed to load transactions',
-                'error': str(e)
-            }), 500
-
-    @vas_bp.route('/transactions', methods=['GET'])
-    @token_required
-    def get_vas_transactions(current_user):
-        """Get user's VAS transaction history"""
-        try:
-            user_id = str(current_user['_id'])
-            
-            limit = int(request.args.get('limit', 50))
-            skip = int(request.args.get('skip', 0))
-            transaction_type = request.args.get('type', None)
-            
-            query = {'userId': ObjectId(user_id)}
-            if transaction_type:
-                query['type'] = transaction_type.upper()
-            
-            transactions = list(
-                mongo.db.vas_transactions.find(query)
-                .sort('createdAt', -1)
-                .skip(skip)
-                .limit(limit)
-            )
-            
-            serialized_transactions = []
-            for txn in transactions:
-                txn_data = serialize_doc(txn)
-                txn_data['createdAt'] = txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
-                serialized_transactions.append(txn_data)
-            
-            return jsonify({
-                'success': True,
-                'data': serialized_transactions,
-                'message': 'Transactions retrieved successfully'
-            }), 200
-            
-        except Exception as e:
-            print(f'❌ Error getting transactions: {str(e)}')
-            return jsonify({
-                'success': False,
-                'message': 'Failed to retrieve transactions',
-                'errors': {'general': [str(e)]}
-            }), 500
-    
-    @vas_bp.route('/reserved-account/create', methods=['POST'])
-    @token_required
-    def create_reserved_account(current_user):
-        """Create a basic reserved account for the user (without KYC)"""
-        try:
-            user_id = str(current_user['_id'])
-            
-            # Check if wallet already exists
-            existing_wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
-            if existing_wallet:
                 return jsonify({
                     'success': True,
-                    'data': {
-                        'accountNumber': existing_wallet.get('accounts', [{}])[0].get('accountNumber', ''),
-                        'accountName': existing_wallet.get('accounts', [{}])[0].get('accountName', ''),
-                        'bankName': existing_wallet.get('accounts', [{}])[0].get('bankName', 'Wema Bank'),
-                        'bankCode': existing_wallet.get('accounts', [{}])[0].get('bankCode', '035'),
-                        'createdAt': existing_wallet.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
-                    },
-                    'message': 'Reserved account already exists'
+                    'data': default_networks,
+                    'message': 'Default data networks (providers unavailable)',
+                    'source': 'default'
                 }), 200
-            
-            # Get Monnify access token
-            access_token = call_monnify_auth()
-            
-            # Create basic reserved account (Tier 1 - no BVN/NIN required)
-            account_data = {
-                'accountReference': f'FICORE_{user_id}',
-                'accountName': current_user.get('fullName', f"FiCore User {user_id[:8]}")[:50],  # Monnify 50-char limit
-                'currencyCode': 'NGN',
-                'contractCode': MONNIFY_CONTRACT_CODE,
-                'customerEmail': current_user.get('email', ''),
-                'customerName': current_user.get('fullName', f"FiCore User {user_id[:8]}")[:50],  # Monnify 50-char limit
-                'getAllAvailableBanks': True  # Moniepoint default, user choice
-            }
-            
-            van_response = requests.post(
-                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                },
-                json=account_data,
-                timeout=30
-            )
-            
-            if van_response.status_code != 200:
-                raise Exception(f'Reserved account creation failed: {van_response.text}')
-            
-            van_data = van_response.json()['responseBody']
-            
-            # Create wallet record
-            wallet_data = {
-                '_id': ObjectId(),
-                'userId': ObjectId(user_id),
-                'balance': 0.0,
-                'accountReference': van_data['accountReference'],
-                'contractCode': van_data['contractCode'],
-                'accounts': van_data['accounts'],
-                'status': 'ACTIVE',
-                'tier': 'TIER_1',  # Basic account without KYC
-                'createdAt': datetime.utcnow(),
-                'updatedAt': datetime.utcnow()
-            }
-            
-            mongo.db.vas_wallets.insert_one(wallet_data)
-            
-            print(f'✅ Basic reserved account created for user {user_id}')
-            
-            # Return all accounts for frontend to choose from
-            return jsonify({
-                'success': True,
-                'data': {
-                    'accounts': van_data['accounts'],  # All available bank accounts
-                    'accountReference': van_data['accountReference'],
-                    'contractCode': van_data['contractCode'],
-                    'tier': 'TIER_1',
-                    'kycVerified': False,
-                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z',
-                    # Keep backward compatibility - return first account as default
-                    'defaultAccount': {
-                        'accountNumber': van_data['accounts'][0].get('accountNumber', '') if van_data['accounts'] else '',
-                        'accountName': van_data['accounts'][0].get('accountName', '') if van_data['accounts'] else '',
-                        'bankName': van_data['accounts'][0].get('bankName', 'Wema Bank') if van_data['accounts'] else 'Wema Bank',
-                        'bankCode': van_data['accounts'][0].get('bankCode', '035') if van_data['accounts'] else '035',
-                    }
-                },
-                'message': f'Reserved account created successfully with {len(van_data["accounts"])} available banks'
-            }), 201
-            
+                
         except Exception as e:
-            print(f'❌ Error creating reserved account: {str(e)}')
+            print(f'❌ Error fetching data networks: {str(e)}')
             return jsonify({
                 'success': False,
-                'message': 'Failed to create reserved account',
+                'message': 'Failed to fetch data networks',
                 'errors': {'general': [str(e)]}
             }), 500
-    
-    def _get_reserved_accounts_with_banks_logic(current_user):
-        """Business logic for getting user's reserved accounts with available banks"""
-        try:
-            user_id = str(current_user['_id'])
-            
-            # Get user's reserved account
-            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
-            if not wallet:
-                return {
-                    'success': False,
-                    'message': 'No wallet found',
-                    'data': None
-                }, 404
-            
-            # Get accounts from wallet (correct field name)
-            accounts = wallet.get('accounts', [])
-            if not accounts:
-                return {
-                    'success': False,
-                    'message': 'No accounts found',
-                    'data': None
-                }, 404
-            
-            # Get preferred bank info
-            preferred_bank_code = wallet.get('preferredBankCode')
-            preferred_bank = None
-            
-            if preferred_bank_code:
-                for account in accounts:
-                    if account.get('bankCode') == preferred_bank_code:
-                        preferred_bank = account
-                        break
-            
-            # If no preferred bank set, use first account as default
-            if not preferred_bank and accounts:
-                preferred_bank = accounts[0]
-            
-            # Return accounts with bank information
-            return {
-                'success': True,
-                'data': {
-                    'accounts': accounts,
-                    'availableBanks': accounts,  # Same as accounts for compatibility
-                    'preferredBank': preferred_bank,
-                    'preferredBankCode': wallet.get('preferredBankCode'),
-                    'hasMultipleBanks': len(accounts) > 1
-                },
-                'message': 'Reserved accounts retrieved successfully'
-            }, 200
-            
-        except Exception as e:
-            print(f'❌ Error getting reserved accounts with banks: {str(e)}')
-            return {
-                'success': False,
-                'message': 'Failed to retrieve reserved accounts',
-                'errors': {'general': [str(e)]}
-            }, 500
 
-    @vas_bp.route('/reserved-accounts', methods=['GET'])
-    @token_required
-    def get_reserved_accounts(current_user):
-        """Get user's reserved accounts (alias for backward compatibility)"""
-        # Call the business logic function
-        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
-        return jsonify(result), status_code
-    
-    @vas_bp.route('/reserved-accounts/with-banks', methods=['GET'])
-    @token_required
-    def get_reserved_accounts_with_banks(current_user):
-        """Get user's reserved accounts with available banks"""
-        # Call the business logic function
-        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
-        return jsonify(result), status_code
-
-    @vas_bp.route('/reserved-account', methods=['GET'])
-    @token_required
-    def get_reserved_account(current_user):
-        """Get user's reserved account details with all available banks"""
-        try:
-            user_id = str(current_user['_id'])
-            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
-            
-            if not wallet:
-                return jsonify({
-                    'success': False,
-                    'message': 'Reserved account not found. Please create a wallet first.'
-                }), 404
-            
-            # Get all available accounts
-            accounts = wallet.get('accounts', [])
-            
-            if not accounts:
-                return jsonify({
-                    'success': False,
-                    'message': 'No accounts found in wallet'
-                }), 404
-            
-            # Return all accounts for frontend to choose from
-            return jsonify({
-                'success': True,
-                'data': {
-                    'accounts': accounts,  # All available bank accounts
-                    'accountReference': wallet.get('accountReference', ''),
-                    'status': wallet.get('status', 'active'),
-                    'tier': wallet.get('tier', 'TIER_1'),
-                    'kycVerified': wallet.get('kycVerified', False),
-                    'createdAt': wallet.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
-                    # Keep backward compatibility - return first account as default
-                    'defaultAccount': {
-                        'accountNumber': accounts[0].get('accountNumber', ''),
-                        'accountName': accounts[0].get('accountName', ''),
-                        'bankName': accounts[0].get('bankName', 'Wema Bank'),
-                        'bankCode': accounts[0].get('bankCode', '035'),
-                    }
-                },
-                'message': f'Reserved account retrieved successfully with {len(accounts)} available banks'
-            }), 200
-            
-        except Exception as e:
-            print(f'❌ Error getting reserved account: {str(e)}')
-            return jsonify({
-                'success': False,
-                'message': 'Failed to retrieve reserved account',
-                'errors': {'general': [str(e)]}
-            }), 500
-    
-    @vas_bp.route('/reserved-account/set-preferred-bank', methods=['POST'])
-    @token_required
-    def set_preferred_bank(current_user):
-        """Set user's preferred bank for their reserved account"""
-        try:
-            user_id = str(current_user['_id'])
-            data = request.get_json()
-            
-            if not data or 'bankCode' not in data:
-                return jsonify({
-                    'success': False,
-                    'message': 'Bank code is required'
-                }), 400
-            
-            bank_code = data['bankCode']
-            
-            # Get user's wallet
-            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
-            if not wallet:
-                return jsonify({
-                    'success': False,
-                    'message': 'Wallet not found'
-                }), 404
-            
-            # Find the selected bank account
-            accounts = wallet.get('accounts', [])
-            selected_account = None
-            
-            for account in accounts:
-                if account.get('bankCode') == bank_code:
-                    selected_account = account
-                    break
-            
-            if not selected_account:
-                return jsonify({
-                    'success': False,
-                    'message': 'Bank not found in your available accounts'
-                }), 404
-            
-            # Update user's preferred bank
-            mongo.db.vas_wallets.update_one(
-                {'userId': ObjectId(user_id)},
-                {
-                    '$set': {
-                        'preferredBankCode': bank_code,
-                        'updatedAt': datetime.utcnow()
-                    }
-                }
-            )
-            
-            print(f'✅ User {user_id} set preferred bank to {selected_account.get("bankName")} ({bank_code})')
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'preferredAccount': selected_account,
-                    'message': f'Preferred bank set to {selected_account.get("bankName")}'
-                },
-                'message': 'Preferred bank updated successfully'
-            }), 200
-            
-        except Exception as e:
-            print(f'❌ Error setting preferred bank: {str(e)}')
-            return jsonify({
-                'success': False,
-                'message': 'Failed to set preferred bank',
-                'errors': {'general': [str(e)]}
-            }), 500
-    
     @vas_bp.route('/reserved-account/add-linked-accounts', methods=['POST'])
     @token_required
     def add_linked_accounts(current_user):
@@ -4670,7 +2440,7 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 }), 500
             
             # Use the CORRECT Monnify API URL and payload structure from their docs
-            url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/add-linked-accounts/{reserved_account_ref}"
+            url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/{reserved_account_ref}/add-linked-accounts"
             
             # Prepare payload according to Monnify documentation
             payload = {
@@ -4694,9 +2464,12 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             if response.status_code == 200:
                 monnify_data = response.json()
                 
+                # Check Monnify's response structure according to official docs
                 if monnify_data.get('requestSuccessful'):
                     response_body = monnify_data.get('responseBody', {})
                     accounts = response_body.get('accounts', [])
+                    
+                    print(f'🏦 Monnify success: {len(accounts)} accounts returned')
                     
                     # Update wallet document with new accounts
                     mongo.db.vas_wallets.update_one(
@@ -4721,11 +2494,15 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                         'message': 'Additional bank accounts added successfully'
                     }), 200
                 else:
+                    # Handle Monnify API error according to official response structure
                     error_msg = monnify_data.get('responseMessage', 'Failed to add linked accounts')
-                    print(f'🏦 Monnify error: {error_msg}')
+                    error_code = monnify_data.get('responseCode', 'UNKNOWN')
+                    print(f'🏦 Monnify API error: {error_code} - {error_msg}')
+                    
                     return jsonify({
                         'success': False,
-                        'message': error_msg
+                        'message': f'Monnify API Error: {error_msg}',
+                        'errorCode': error_code
                     }), 400
             else:
                 print(f'🏦 Monnify API error: {response.status_code}')
