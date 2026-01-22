@@ -4168,7 +4168,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 'message': 'Failed to add additional bank accounts',
                 'error': str(e)
             }), 500
-            )
             
             print(f"Successfully added {len(banks_to_add)} linked accounts. Now has {len(updated_accounts)} banks.")
             
@@ -4981,3 +4980,4 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 }), 500
 
     return vas_bp
+
