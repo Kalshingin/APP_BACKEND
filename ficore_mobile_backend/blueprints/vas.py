@@ -4129,17 +4129,36 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 return jsonify({'success': False, 'message': 'User not found'}), 404
             
             print(f'🏦 DEBUG: User found, looking up wallet...')
-            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            try:
+                wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                print(f'🏦 DEBUG: Wallet query completed, result: {wallet is not None}')
+                if wallet:
+                    print(f'🏦 DEBUG: Wallet found with keys: {list(wallet.keys())}')
+                else:
+                    print(f'🏦 DEBUG: No wallet found for user: {user_id}')
+            except Exception as wallet_error:
+                print(f'🏦 DEBUG: Wallet lookup failed with error: {str(wallet_error)}')
+                raise wallet_error
+                
             if not wallet:
                 print(f'🏦 DEBUG: No wallet found for user: {user_id}')
                 return jsonify({'success': False, 'message': 'No wallet found. Please create one first.'}), 404
             
+            print(f'🏦 DEBUG: Wallet found, checking reserved account reference...')
             reserved_account_ref = wallet.get('reservedAccountReference') or wallet.get('accountReference')
+            print(f'🏦 DEBUG: Reserved account ref: {reserved_account_ref}')
+            
             if not reserved_account_ref:
+                print(f'🏦 DEBUG: No reserved account reference found')
                 return jsonify({'success': False, 'message': 'No existing reserved account reference found.'}), 400
             
             # Gate: only allow for fully verified users (BVN + NIN present)
-            if not user_doc.get('bvn'):
+            print(f'🏦 DEBUG: Checking BVN verification...')
+            user_bvn = user_doc.get('bvn')
+            print(f'🏦 DEBUG: User BVN exists: {user_bvn is not None}')
+            
+            if not user_bvn:
+                print(f'🏦 DEBUG: BVN verification required')
                 return jsonify({
                     'success': False,
                     'message': 'BVN verification required before adding additional accounts'
