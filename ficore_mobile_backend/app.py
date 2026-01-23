@@ -40,7 +40,10 @@ from blueprints.admin_subscription_management import init_admin_subscription_man
 from blueprints.atomic_entries import init_atomic_entries_blueprint
 from blueprints.reports import init_reports_blueprint
 from blueprints.voice_reporting import init_voice_reporting_blueprint
-from blueprints.vas import init_vas_blueprint
+# VAS modules - broken down from monolithic blueprint
+from vas_wallet import init_vas_wallet_blueprint
+from vas_purchase import init_vas_purchase_blueprint
+from vas_bills import init_vas_bills_blueprint
 
 # Import database models
 from models import DatabaseInitializer
@@ -348,8 +351,10 @@ atomic_entries_blueprint = init_atomic_entries_blueprint(mongo, token_required, 
 reports_blueprint = init_reports_blueprint(mongo, token_required)
 voice_reporting_blueprint = init_voice_reporting_blueprint(mongo, token_required, serialize_doc)
 
-# Initialize VAS blueprint for wallet and utility services
-vas_blueprint = init_vas_blueprint(mongo, token_required, serialize_doc)
+# Initialize VAS modules - broken down from monolithic blueprint
+vas_wallet_blueprint = init_vas_wallet_blueprint(mongo, token_required, serialize_doc)
+vas_purchase_blueprint = init_vas_purchase_blueprint(mongo, token_required, serialize_doc)
+vas_bills_blueprint = init_vas_bills_blueprint(mongo, token_required, serialize_doc)
 
 # Initialize rate limit tracker
 rate_limit_tracker = RateLimitTracker(mongo)
@@ -402,9 +407,13 @@ print("✓ Reports blueprint registered at /api/reports")
 app.register_blueprint(voice_reporting_blueprint)
 print("✓ Voice reporting blueprint registered at /api/voice")
 
-# Register VAS blueprint for wallet and utility services
-app.register_blueprint(vas_blueprint)
-print("✓ VAS blueprint registered at /api/vas")
+# Register VAS modules - broken down from monolithic blueprint
+app.register_blueprint(vas_wallet_blueprint)
+print("✓ VAS Wallet blueprint registered at /api/vas/wallet")
+app.register_blueprint(vas_purchase_blueprint)
+print("✓ VAS Purchase blueprint registered at /api/vas/purchase")
+app.register_blueprint(vas_bills_blueprint)
+print("✓ VAS Bills blueprint registered at /api/vas/bills")
 
 # Root redirect to admin login
 @app.route('/')

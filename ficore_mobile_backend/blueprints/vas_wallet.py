@@ -1,0 +1,1725 @@
+"""
+VAS Wallet Management Module - Production Grade
+Handles wallet creation, funding, balance management, and reserved accounts
+
+Security: API keys in environment variables, idempotency protection, webhook verification
+Providers: Monnify (primary wallet provider)
+Features: Reserved accounts, KYC verification, multi-bank support, webhook processing
+"""
+
+from flask import Blueprint, request, jsonify
+from datetime import datetime, timedelta
+from bson import ObjectId
+import os
+import requests
+import hmac
+import hashlib
+import uuid
+import json
+import pymongo
+import time
+from utils.email_service import get_email_service
+from blueprints.notifications import create_user_notification
+
+def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
+    vas_wallet_bp = Blueprint('vas_wallet', __name__, url_prefix='/api/vas/wallet')
+    
+    # Environment variables (NEVER hardcode these)
+    MONNIFY_API_KEY = os.environ.get('MONNIFY_API_KEY', '')
+    MONNIFY_SECRET_KEY = os.environ.get('MONNIFY_SECRET_KEY', '')
+    MONNIFY_CONTRACT_CODE = os.environ.get('MONNIFY_CONTRACT_CODE', '')
+    MONNIFY_BASE_URL = os.environ.get('MONNIFY_BASE_URL', 'https://sandbox.monnify.com')
+    
+    VAS_TRANSACTION_FEE = 30.0
+    ACTIVATION_FEE = 100.0
+    BVN_VERIFICATION_COST = 10.0
+    NIN_VERIFICATION_COST = 60.0
+    
+    # ==================== HELPER FUNCTIONS ====================
+    
+    def call_monnify_auth():
+        """Get Monnify authentication token"""
+        try:
+            auth_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v1/auth/login',
+                auth=(MONNIFY_API_KEY, MONNIFY_SECRET_KEY),
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            )
+            
+            if auth_response.status_code != 200:
+                raise Exception(f'Monnify auth failed: {auth_response.text}')
+            
+            return auth_response.json()['responseBody']['accessToken']
+        except Exception as e:
+            print(f'ERROR: Monnify auth error: {str(e)}')
+            raise
+    
+    def check_eligibility(user_id):
+        """
+        Check if user is eligible for dedicated account (Path B)
+        User must meet ONE of these criteria:
+        1. Used app for 3+ consecutive days
+        2. Recorded 10+ transactions (income/expense)
+        """
+        user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+        
+        # Check 1: Consecutive days - Use rewards.streak as authoritative source
+        rewards_record = mongo.db.rewards.find_one({'user_id': ObjectId(user_id)})
+        login_streak = rewards_record.get('streak', 0) if rewards_record else 0
+        if login_streak >= 3:
+            return True, "3-day streak"
+        
+        # Check 2: Total transactions
+        total_txns = mongo.db.income.count_documents({'userId': ObjectId(user_id)})
+        total_txns += mongo.db.expenses.count_documents({'userId': ObjectId(user_id)})
+        if total_txns >= 10:
+            return True, "10+ transactions"
+        
+        return False, None
+    
+    def get_eligibility_progress(user_id):
+        """Get user's progress towards eligibility"""
+        user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+        
+        # Use rewards.streak as authoritative source for login streak
+        rewards_record = mongo.db.rewards.find_one({'user_id': ObjectId(user_id)})
+        login_streak = rewards_record.get('streak', 0) if rewards_record else 0
+        total_txns = mongo.db.income.count_documents({'userId': ObjectId(user_id)})
+        total_txns += mongo.db.expenses.count_documents({'userId': ObjectId(user_id)})
+        
+        # Return flat structure that matches frontend expectations
+        return {
+            'loginDays': login_streak,  # Frontend expects 'loginDays', not 'loginStreak'
+            'totalTransactions': total_txns
+        }
+    
+    def call_monnify_bvn_verification(bvn, name, dob, mobile):
+        """
+        Call Monnify BVN verification API
+        Cost: ₦ 10 per successful request
+        """
+        try:
+            access_token = call_monnify_auth()
+            
+            response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v1/vas/bvn-details-match',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'bvn': bvn,
+                    'name': name,
+                    'dateOfBirth': dob,
+                    'mobileNo': mobile
+                },
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f'BVN verification failed: {response.text}')
+            
+            data = response.json()
+            if not data.get('requestSuccessful'):
+                raise Exception(f'BVN verification failed: {data.get("responseMessage")}')
+            
+            return data['responseBody']
+        except Exception as e:
+            print(f'ERROR: BVN verification error: {str(e)}')
+            raise
+    
+    def call_monnify_nin_verification(nin):
+        """
+        Call Monnify NIN verification API
+        Cost: ₦ 60 per successful request
+        Returns NIN holder's details for validation
+        """
+        try:
+            access_token = call_monnify_auth()
+            
+            response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v1/vas/nin-details',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json={'nin': nin},
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f'NIN verification failed: {response.text}')
+            
+            data = response.json()
+            if not data.get('requestSuccessful'):
+                raise Exception(f'NIN verification failed: {data.get("responseMessage")}')
+            
+            return data['responseBody']
+        except Exception as e:
+            print(f'ERROR: NIN verification error: {str(e)}')
+            raise
+    
+    # ==================== WALLET ENDPOINTS ====================
+    
+    @vas_wallet_bp.route('/create', methods=['POST'])
+    @token_required
+    def create_wallet(current_user):
+        """Create virtual account number (VAN) for user via Monnify"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            existing_wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if existing_wallet:
+                return jsonify({
+                    'success': True,
+                    'data': serialize_doc(existing_wallet),
+                    'message': 'Wallet already exists'
+                }), 200
+            
+            auth_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v1/auth/login',
+                auth=(MONNIFY_API_KEY, MONNIFY_SECRET_KEY),
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            )
+            
+            if auth_response.status_code != 200:
+                raise Exception(f'Monnify auth failed: {auth_response.text}')
+            
+            access_token = auth_response.json()['responseBody']['accessToken']
+            
+            account_data = {
+                'accountReference': user_id,  # STANDARDIZED: Use ObjectId string only
+                'accountName': f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()[:50],  # Monnify 50-char limit
+                'currencyCode': 'NGN',
+                'contractCode': MONNIFY_CONTRACT_CODE,
+                'customerEmail': current_user.get('email', ''),
+                'customerName': f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()[:50],  # Monnify 50-char limit
+                'getAllAvailableBanks': True
+            }
+            
+            van_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json=account_data,
+                timeout=30
+            )
+            
+            if van_response.status_code != 200:
+                raise Exception(f'VAN creation failed: {van_response.text}')
+            
+            van_data = van_response.json()['responseBody']
+            
+            wallet = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'balance': 0.0,
+                'accountReference': van_data['accountReference'],
+                'accountName': van_data['accountName'],
+                'accounts': van_data['accounts'],
+                'status': 'active',
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow()
+            }
+            
+            mongo.db.vas_wallets.insert_one(wallet)
+            
+            return jsonify({
+                'success': True,
+                'data': serialize_doc(wallet),
+                'message': 'Wallet created successfully'
+            }), 201
+            
+        except Exception as e:
+            print(f'ERROR: Error creating wallet: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to create wallet',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_wallet_bp.route('/balance', methods=['GET'])
+    @token_required
+    def get_wallet_balance(current_user):
+        """Get user's wallet balance"""
+        try:
+            user_id = str(current_user['_id'])
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet not found. Please create a wallet first.'
+                }), 404
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'balance': wallet.get('balance', 0.0),
+                    'accounts': wallet.get('accounts', []),
+                    'accountName': wallet.get('accountName', ''),
+                    'status': wallet.get('status', 'active')
+                },
+                'message': 'Wallet balance retrieved successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error getting wallet balance: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to retrieve wallet balance',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    # ==================== ELIGIBILITY & KYC ENDPOINTS ====================
+    
+    @vas_wallet_bp.route('/check-eligibility', methods=['GET'])
+    @token_required
+    def check_eligibility_endpoint(current_user):
+        """Check if user is eligible for dedicated account (Path B)"""
+        try:
+            user_id = str(current_user['_id'])
+            eligible, reason = check_eligibility(user_id)
+            progress = get_eligibility_progress(user_id)
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'eligible': eligible,
+                    'reason': reason,
+                    'progress': progress
+                },
+                'message': 'Eligibility checked successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error checking eligibility: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to check eligibility',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_wallet_bp.route('/check-existing-bvn-nin', methods=['POST'])
+    @token_required
+    def check_existing_bvn_nin(current_user):
+        """
+        Check if BVN or NIN already exists in the database
+        """
+        try:
+            data = request.json
+            bvn = data.get('bvn', '').strip()
+            nin = data.get('nin', '').strip()
+            
+            # Validate input
+            if len(bvn) != 11 or not bvn.isdigit():
+                return jsonify({
+                    'success': False,
+                    'exists': False,
+                    'message': 'Invalid BVN format'
+                }), 400
+            
+            if len(nin) != 11 or not nin.isdigit():
+                return jsonify({
+                    'success': False,
+                    'exists': False,
+                    'message': 'Invalid NIN format'
+                }), 400
+            
+            # Check if BVN exists in any wallet
+            bvn_exists = mongo.db.vas_wallets.find_one({
+                'bvn': bvn,
+                'status': 'ACTIVE'
+            })
+            
+            # Check if NIN exists in any wallet
+            nin_exists = mongo.db.vas_wallets.find_one({
+                'nin': nin,
+                'status': 'ACTIVE'
+            })
+            
+            # Also check in user profiles
+            bvn_in_profile = mongo.db.users.find_one({
+                'bvn': bvn
+            })
+            
+            nin_in_profile = mongo.db.users.find_one({
+                'nin': nin
+            })
+            
+            exists = bool(bvn_exists or nin_exists or bvn_in_profile or nin_in_profile)
+            
+            if exists:
+                message = 'This BVN or NIN has already been used for account creation.'
+            else:
+                message = 'BVN and NIN are available for use.'
+            
+            return jsonify({
+                'success': True,
+                'exists': exists,
+                'message': message,
+                'details': {
+                    'bvn_in_wallet': bool(bvn_exists),
+                    'nin_in_wallet': bool(nin_exists),
+                    'bvn_in_profile': bool(bvn_in_profile),
+                    'nin_in_profile': bool(nin_in_profile)
+                }
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error checking existing BVN/NIN: {str(e)}')
+            return jsonify({
+                'success': False,
+                'exists': False,
+                'message': 'Error checking records',
+                'error': str(e)
+            }), 500
+    @vas_wallet_bp.route('/verify-bvn', methods=['POST'])
+    @token_required
+    def verify_bvn(current_user):
+        """
+        Create Monnify account using BVN and NIN - FREE for users (business absorbs ₦ 70 cost)
+        Uses original working approach: send BVN directly to Monnify for account creation
+        """
+        try:
+            data = request.json
+            bvn = data.get('bvn', '').strip()
+            nin = data.get('nin', '').strip()
+            phone_number = data.get('phoneNumber', '').strip()  # Only phone needed
+            
+            print(f"INFO: BVN Account Creation Request - BVN: {bvn}, NIN: {nin}, Phone: {phone_number}")
+            
+            # Validate
+            if len(bvn) != 11 or not bvn.isdigit():
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid BVN. Must be 11 digits.'
+                }), 400
+            
+            if len(nin) != 11 or not nin.isdigit():
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid NIN. Must be 11 digits.'
+                }), 400
+            
+            if not phone_number:
+                return jsonify({
+                    'success': False,
+                    'message': 'Phone number is required.'
+                }), 400
+            
+            # Validate phone number format
+            if len(phone_number) < 10 or len(phone_number) > 14:
+                return jsonify({
+                    'success': False,
+                    'message': 'Invalid phone number format.'
+                }), 400
+            
+            # Check eligibility first
+            user_id = str(current_user['_id'])
+            eligible, _ = check_eligibility(user_id)
+            if not eligible:
+                return jsonify({
+                    'success': False,
+                    'message': 'Not eligible yet. Complete more transactions to unlock.'
+                }), 403
+            
+            # Check if user already has verified wallet
+            existing_wallet = mongo.db.vas_wallets.find_one({
+                'userId': ObjectId(user_id),
+                'kycStatus': 'verified'
+            })
+            if existing_wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'You already have a verified account.'
+                }), 400
+            
+            # Use user profile data for account creation
+            user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip()
+            user_email = current_user.get('email', '').strip()
+            
+            # If no name in profile, use a default
+            if not user_name:
+                user_name = f"FiCore User {user_id[:8]}"
+            
+            print(f"INFO: Account creation details - Name: '{user_name}', Phone: '{phone_number}', Email: '{user_email}'")
+            
+            # Create dedicated account immediately using Monnify account creation (not verification)
+            # This is the original working approach - send BVN directly to create account
+            access_token = call_monnify_auth()
+            
+            account_data = {
+                'accountReference': user_id,  # STANDARDIZED: Use ObjectId string only
+                'accountName': user_name[:50],  # Monnify 50-char limit
+                'currencyCode': 'NGN',
+                'contractCode': MONNIFY_CONTRACT_CODE,
+                'customerEmail': user_email,
+                'customerName': user_name[:50],  # Monnify 50-char limit
+                'bvn': bvn,
+                'nin': nin,
+                'getAllAvailableBanks': True  # Get all available banks for user choice
+            }
+            
+            print(f"DEBUG: Creating Monnify reserved account with BVN: {bvn[:3]}***{bvn[-3:]}")
+            
+            van_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json=account_data,
+                timeout=30
+            )
+            
+            if van_response.status_code != 200:
+                print(f"ERROR: Monnify account creation failed: {van_response.status_code} - {van_response.text}")
+                raise Exception(f'Reserved account creation failed: {van_response.text}')
+            
+            van_data = van_response.json()['responseBody']
+            print(f"SUCCESS: Monnify account created successfully with {len(van_data.get('accounts', []))} banks")
+            
+            # Update user profile with KYC data including BVN/NIN
+            profile_update = {
+                'phone': phone_number,  # Save phone number to profile
+                'bvn': bvn,          # Save BVN (for future reference)
+                'nin': nin,          # Save NIN (for future reference)
+                'kycStatus': 'verified',  # Mark KYC as completed
+                'kycVerifiedAt': datetime.utcnow(),
+                'bvnVerified': True,
+                'ninVerified': True,
+                'verificationStatus': 'VERIFIED',
+                'updatedAt': datetime.utcnow()
+            }
+            
+            # Only update full name if it's more complete than current profile
+            current_display_name = current_user.get('displayName', '').strip()
+            if len(user_name) > len(current_display_name):
+                profile_update['displayName'] = user_name
+            
+            # Update user profile (single update with all data)
+            mongo.db.users.update_one(
+                {'_id': ObjectId(user_id)},
+                {'$set': profile_update}
+            )
+            
+            print(f"SUCCESS: Updated user profile with KYC data: phone={phone_number}, BVN/NIN stored, KYC=verified")
+            
+            # Create wallet record with KYC verification
+            wallet_data = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'balance': 0.0,
+                'accountReference': van_data['accountReference'],
+                'contractCode': van_data['contractCode'],
+                'accounts': van_data['accounts'],
+                'status': 'ACTIVE',
+                'tier': 'TIER_2',  # Full KYC verified account
+                'kycVerified': True,
+                'kycStatus': 'verified',
+                'bvn': bvn,
+                'nin': nin,
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow()
+            }
+            
+            mongo.db.vas_wallets.insert_one(wallet_data)
+            
+            # Record business expense for account creation (business absorbs verification costs)
+            business_expense = {
+                '_id': ObjectId(),
+                'type': 'ACCOUNT_CREATION_COSTS',
+                'amount': 70.0,  # ₦ 10 BVN + ₦ 60 NIN (absorbed by business)
+                'userId': ObjectId(user_id),
+                'description': f'Account creation costs for user {user_id} (BVN/NIN verification absorbed by business)',
+                'status': 'RECORDED',
+                'createdAt': datetime.utcnow(),
+                'metadata': {
+                    'bvnCost': 10.0,
+                    'ninCost': 60.0,
+                    'businessExpense': True,
+                    'userCharged': False,
+                    'accountCreation': True
+                }
+            }
+            mongo.db.business_expenses.insert_one(business_expense)
+            
+            print(f'SUCCESS: FREE account creation completed for user {user_id}: {user_name}')
+            print(f'EXPENSE: Business expense recorded: ₦ 70 verification costs (absorbed by business)')
+            
+            # Return all accounts for frontend to choose from
+            return jsonify({
+                'success': True,
+                'data': {
+                    'accounts': van_data['accounts'],  # All available bank accounts
+                    'accountReference': van_data['accountReference'],
+                    'contractCode': van_data['contractCode'],
+                    'tier': 'TIER_2',
+                    'kycVerified': True,
+                    'verifiedName': user_name,
+                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z',
+                    # Keep backward compatibility - return first account as default
+                    'defaultAccount': {
+                        'accountNumber': van_data['accounts'][0].get('accountNumber', '') if van_data['accounts'] else '',
+                        'accountName': van_data['accounts'][0].get('accountName', '') if van_data['accounts'] else '',
+                        'bankName': van_data['accounts'][0].get('bankName', 'Wema Bank') if van_data['accounts'] else 'Wema Bank',
+                        'bankCode': van_data['accounts'][0].get('bankCode', '035') if van_data['accounts'] else '035',
+                    }
+                },
+                'message': f'Account created successfully with {len(van_data["accounts"])} available banks!'
+            }), 201
+            
+        except Exception as e:
+            print(f'ERROR: Error verifying BVN/NIN: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Verification failed',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_wallet_bp.route('/validation/validate-details', methods=['POST'])
+    @token_required
+    def validate_kyc_details(current_user):
+        """Pre-validate BVN/NIN format before payment to reduce errors"""
+        try:
+            data = request.get_json()
+            
+            bvn = data.get('bvn', '').strip()
+            nin = data.get('nin', '').strip()
+            
+            errors = []
+            
+            # Validate BVN format
+            if not bvn:
+                errors.append('BVN is required')
+            elif len(bvn) != 11 or not bvn.isdigit():
+                errors.append('BVN must be exactly 11 digits')
+            
+            # Validate NIN format
+            if not nin:
+                errors.append('NIN is required')
+            elif len(nin) != 11 or not nin.isdigit():
+                errors.append('NIN must be exactly 11 digits')
+            
+            # Check if BVN and NIN are the same (common mistake)
+            if bvn and nin and bvn == nin:
+                errors.append('BVN and NIN cannot be the same number')
+            
+            if errors:
+                return jsonify({
+                    'success': False,
+                    'message': 'Please correct the following errors before proceeding',
+                    'errors': {'validation': errors},
+                    'warning': 'Double-check your details to avoid losing the ₦ 70 non-refundable government verification fee'
+                }), 400
+            
+            return jsonify({
+                'success': True,
+                'message': 'Details format validated successfully',
+                'data': {
+                    'bvnValid': True,
+                    'ninValid': True,
+                    'readyForPayment': True
+                },
+                'disclaimer': {
+                    'nonRefundable': True,
+                    'governmentFee': True,
+                    'warning': 'IMPORTANT: The ₦ 70 verification fee is a government charge and is NON-REFUNDABLE. If your BVN/NIN details are incorrect, you will need to pay again.',
+                    'advice': 'Please triple-check your BVN and NIN numbers before proceeding to payment.'
+                }
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error validating KYC details: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': {'general': [str(e)]}
+            }), 500
+
+    @vas_wallet_bp.route('/confirm-kyc', methods=['POST'])
+    @token_required
+    def confirm_kyc(current_user):
+        """
+        User confirmed the name is correct
+        Now create the reserved account with KYC
+        """
+        try:
+            user_id = str(current_user['_id'])
+            
+            # Get pending verification
+            verification = mongo.db.kyc_verifications.find_one({
+                'userId': ObjectId(user_id),
+                'status': 'pending_confirmation',
+                'expiresAt': {'$gt': datetime.utcnow()}
+            })
+            
+            if not verification:
+                return jsonify({
+                    'success': False,
+                    'message': 'Verification expired. Please try again.'
+                }), 400
+            
+            # Check if wallet already exists
+            existing_wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if existing_wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet already exists.'
+                }), 400
+            
+            # Create reserved account with BVN and NIN (reuse existing wallet creation logic)
+            access_token = call_monnify_auth()
+            
+            account_data = {
+                'accountReference': user_id,  # STANDARDIZED: Use ObjectId string only
+                'accountName': verification['verifiedName'][:50],  # Monnify 50-char limit
+                'currencyCode': 'NGN',
+                'contractCode': MONNIFY_CONTRACT_CODE,
+                'customerEmail': current_user.get('email', ''),
+                'customerName': verification['verifiedName'][:50],  # Monnify 50-char limit
+                'bvn': verification['bvn'],
+                'nin': verification['nin'],  # Include NIN for full Tier 2 compliance
+                'getAllAvailableBanks': True  # Moniepoint default, user choice
+            }
+            
+            van_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json=account_data,
+                timeout=30
+            )
+            
+            if van_response.status_code != 200:
+                raise Exception(f'Reserved account creation failed: {van_response.text}')
+            
+            van_data = van_response.json()['responseBody']
+            
+            # Create wallet with KYC info (BVN + NIN for full Tier 2)
+            wallet = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'balance': 0.0,
+                'accountReference': van_data['accountReference'],
+                'accountName': van_data['accountName'],
+                'accounts': van_data['accounts'],
+                'kycStatus': 'verified',
+                'kycTier': 2,  # Full Tier 2 compliance with BVN + NIN
+                'bvnVerified': True,
+                'ninVerified': True,
+                'verifiedName': verification['verifiedName'],
+                'verificationDate': datetime.utcnow(),
+                'isActivated': False,
+                'activationFeeDeducted': False,
+                'activationDate': None,
+                'status': 'active',
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow()
+            }
+            
+            mongo.db.vas_wallets.insert_one(wallet)
+            
+            # Update verification status
+            mongo.db.kyc_verifications.update_one(
+                {'_id': verification['_id']},
+                {'$set': {'status': 'confirmed', 'updatedAt': datetime.utcnow()}}
+            )
+            
+            # CRITICAL FIX: Update user profile with BVN/NIN to prevent future linked account issues
+            user_profile_update = {
+                'bvn': verification['bvn'],
+                'nin': verification['nin'],
+                'kycStatus': 'verified',
+                'kycVerifiedAt': datetime.utcnow(),
+                'bvnVerified': True,
+                'ninVerified': True,
+                'verificationStatus': 'VERIFIED',
+                'updatedAt': datetime.utcnow()
+            }
+            
+            mongo.db.users.update_one(
+                {'_id': ObjectId(user_id)},
+                {'$set': user_profile_update}
+            )
+            
+            print(f'SUCCESS: Updated user profile with BVN/NIN verification: {user_id}')
+            print(f'SUCCESS: Reserved account created for user {user_id}')
+            
+            return jsonify({
+                'success': True,
+                'data': serialize_doc(wallet),
+                'message': 'Account created successfully'
+            }), 201
+            
+        except Exception as e:
+            print(f'ERROR: Error confirming KYC: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to create account',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    # ==================== RESERVED ACCOUNT ENDPOINTS ====================
+    
+    @vas_wallet_bp.route('/reserved-account/create', methods=['POST'])
+    @token_required
+    def create_reserved_account(current_user):
+        """Create a basic reserved account for the user (without KYC)"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            # Check if wallet already exists
+            existing_wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if existing_wallet:
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'accountNumber': existing_wallet.get('accounts', [{}])[0].get('accountNumber', ''),
+                        'accountName': existing_wallet.get('accounts', [{}])[0].get('accountName', ''),
+                        'bankName': existing_wallet.get('accounts', [{}])[0].get('bankName', 'Wema Bank'),
+                        'bankCode': existing_wallet.get('accounts', [{}])[0].get('bankCode', '035'),
+                        'createdAt': existing_wallet.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
+                    },
+                    'message': 'Reserved account already exists'
+                }), 200
+            
+            # Get Monnify access token
+            access_token = call_monnify_auth()
+            
+            # Create basic reserved account (Tier 1 - no BVN/NIN required)
+            account_data = {
+                'accountReference': user_id,  # STANDARDIZED: Use ObjectId string only
+                'accountName': current_user.get('fullName', f"FiCore User {user_id[:8]}")[:50],  # Monnify 50-char limit
+                'currencyCode': 'NGN',
+                'contractCode': MONNIFY_CONTRACT_CODE,
+                'customerEmail': current_user.get('email', ''),
+                'customerName': current_user.get('fullName', f"FiCore User {user_id[:8]}")[:50],  # Monnify 50-char limit
+                'getAllAvailableBanks': True  # Moniepoint default, user choice
+            }
+            
+            van_response = requests.post(
+                f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json=account_data,
+                timeout=30
+            )
+            
+            if van_response.status_code != 200:
+                raise Exception(f'Reserved account creation failed: {van_response.text}')
+            
+            van_data = van_response.json()['responseBody']
+            
+            # Create wallet record
+            wallet_data = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'balance': 0.0,
+                'accountReference': van_data['accountReference'],
+                'contractCode': van_data['contractCode'],
+                'accounts': van_data['accounts'],
+                'status': 'ACTIVE',
+                'tier': 'TIER_1',  # Basic account without KYC
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow()
+            }
+            
+            mongo.db.vas_wallets.insert_one(wallet_data)
+            
+            print(f'SUCCESS: Basic reserved account created for user {user_id}')
+            
+            # Return all accounts for frontend to choose from
+            return jsonify({
+                'success': True,
+                'data': {
+                    'accounts': van_data['accounts'],  # All available bank accounts
+                    'accountReference': van_data['accountReference'],
+                    'contractCode': van_data['contractCode'],
+                    'tier': 'TIER_1',
+                    'kycVerified': False,
+                    'createdAt': wallet_data['createdAt'].isoformat() + 'Z',
+                    # Keep backward compatibility - return first account as default
+                    'defaultAccount': {
+                        'accountNumber': van_data['accounts'][0].get('accountNumber', '') if van_data['accounts'] else '',
+                        'accountName': van_data['accounts'][0].get('accountName', '') if van_data['accounts'] else '',
+                        'bankName': van_data['accounts'][0].get('bankName', 'Wema Bank') if van_data['accounts'] else 'Wema Bank',
+                        'bankCode': van_data['accounts'][0].get('bankCode', '035') if van_data['accounts'] else '035',
+                    }
+                },
+                'message': f'Reserved account created successfully with {len(van_data["accounts"])} available banks'
+            }), 201
+            
+        except Exception as e:
+            print(f'ERROR: Error creating reserved account: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to create reserved account',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    def _get_reserved_accounts_with_banks_logic(current_user):
+        """Business logic for getting user's reserved accounts with available banks"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            # Get user's reserved account
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return {
+                    'success': False,
+                    'message': 'No wallet found',
+                    'data': None
+                }, 404
+            
+            # Get accounts from wallet (correct field name)
+            accounts = wallet.get('accounts', [])
+            if not accounts:
+                return {
+                    'success': False,
+                    'message': 'No accounts found',
+                    'data': None
+                }, 404
+            
+            # Get preferred bank info
+            preferred_bank_code = wallet.get('preferredBankCode')
+            preferred_bank = None
+            
+            if preferred_bank_code:
+                for account in accounts:
+                    if account.get('bankCode') == preferred_bank_code:
+                        preferred_bank = account
+                        break
+            
+            # If no preferred bank set, use first account as default
+            if not preferred_bank and accounts:
+                preferred_bank = accounts[0]
+            
+            # Return accounts with bank information
+            return {
+                'success': True,
+                'data': {
+                    'accounts': accounts,
+                    'availableBanks': accounts,  # Same as accounts for compatibility
+                    'preferredBank': preferred_bank,
+                    'preferredBankCode': wallet.get('preferredBankCode'),
+                    'hasMultipleBanks': len(accounts) > 1
+                },
+                'message': 'Reserved accounts retrieved successfully'
+            }, 200
+            
+        except Exception as e:
+            print(f'ERROR: Error getting reserved accounts with banks: {str(e)}')
+            return {
+                'success': False,
+                'message': 'Failed to retrieve reserved accounts',
+                'errors': {'general': [str(e)]}
+            }, 500
+
+    @vas_wallet_bp.route('/reserved-accounts', methods=['GET'])
+    @token_required
+    def get_reserved_accounts(current_user):
+        """Get user's reserved accounts (alias for backward compatibility)"""
+        # Call the business logic function
+        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
+        return jsonify(result), status_code
+    
+    @vas_wallet_bp.route('/reserved-accounts/with-banks', methods=['GET'])
+    @token_required
+    def get_reserved_accounts_with_banks(current_user):
+        """Get user's reserved accounts with available banks"""
+        # Call the business logic function
+        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
+        return jsonify(result), status_code
+    @vas_wallet_bp.route('/reserved-account', methods=['GET'])
+    @token_required
+    def get_reserved_account(current_user):
+        """Get user's reserved account details with all available banks"""
+        try:
+            user_id = str(current_user['_id'])
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Reserved account not found. Please create a wallet first.'
+                }), 404
+            
+            # Get all available accounts
+            accounts = wallet.get('accounts', [])
+            
+            if not accounts:
+                return jsonify({
+                    'success': False,
+                    'message': 'No accounts found in wallet'
+                }), 404
+            
+            # Return all accounts for frontend to choose from
+            return jsonify({
+                'success': True,
+                'data': {
+                    'accounts': accounts,  # All available bank accounts
+                    'accountReference': wallet.get('accountReference', ''),
+                    'status': wallet.get('status', 'active'),
+                    'tier': wallet.get('tier', 'TIER_1'),
+                    'kycVerified': wallet.get('kycVerified', False),
+                    'createdAt': wallet.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                    # Keep backward compatibility - return first account as default
+                    'defaultAccount': {
+                        'accountNumber': accounts[0].get('accountNumber', ''),
+                        'accountName': accounts[0].get('accountName', ''),
+                        'bankName': accounts[0].get('bankName', 'Wema Bank'),
+                        'bankCode': accounts[0].get('bankCode', '035'),
+                    }
+                },
+                'message': f'Reserved account retrieved successfully with {len(accounts)} available banks'
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error getting reserved account: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to retrieve reserved account',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_wallet_bp.route('/reserved-account/set-preferred-bank', methods=['POST'])
+    @token_required
+    def set_preferred_bank(current_user):
+        """Set user's preferred bank for their reserved account"""
+        try:
+            user_id = str(current_user['_id'])
+            data = request.get_json()
+            
+            if not data or 'bankCode' not in data:
+                return jsonify({
+                    'success': False,
+                    'message': 'Bank code is required'
+                }), 400
+            
+            bank_code = data['bankCode']
+            
+            # Get user's wallet
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet not found'
+                }), 404
+            
+            # Find the selected bank account
+            accounts = wallet.get('accounts', [])
+            selected_account = None
+            
+            for account in accounts:
+                if account.get('bankCode') == bank_code:
+                    selected_account = account
+                    break
+            
+            if not selected_account:
+                return jsonify({
+                    'success': False,
+                    'message': 'Bank not found in your available accounts'
+                }), 404
+            
+            # Update user's preferred bank
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'preferredBankCode': bank_code,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            print(f'SUCCESS: User {user_id} set preferred bank to {selected_account.get("bankName")} ({bank_code})')
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'preferredAccount': selected_account,
+                    'message': f'Preferred bank set to {selected_account.get("bankName")}'
+                },
+                'message': 'Preferred bank updated successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error setting preferred bank: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to set preferred bank',
+                'errors': {'general': [str(e)]}
+            }), 500
+    @vas_wallet_bp.route('/reserved-account/add-linked-accounts', methods=['POST'])
+    @token_required
+    def add_linked_accounts(current_user):
+        """Add additional bank accounts to existing reserved account for verified users"""
+        try:
+            print(f'DEBUG: Function started, current_user: {current_user}')
+            
+            user_id = str(current_user['_id'])
+            print(f'DEBUG: user_id extracted: {user_id}')
+            
+            data = request.get_json() or {}
+            print(f'DEBUG: request data: {data}')
+            
+            # Support both parameter formats for flexibility
+            get_all_available_banks = data.get('getAllAvailableBanks', False)
+            preferred_banks = data.get('preferredBanks', data.get('bankCodes', ['50515', '101']))
+            
+            print(f'DEBUG: Adding linked accounts for user {user_id}')
+            print(f'DEBUG: getAllAvailableBanks: {get_all_available_banks}')
+            print(f'DEBUG: preferredBanks: {preferred_banks}')
+            
+            # Get user's wallet
+            print(f'DEBUG: Looking up user document...')
+            user_doc = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+            if not user_doc:
+                print(f'DEBUG: User not found for ID: {user_id}')
+                return jsonify({'success': False, 'message': 'User not found'}), 404
+            
+            print(f'DEBUG: User found, looking up wallet...')
+            try:
+                wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                print(f'DEBUG: Wallet query completed, result: {wallet is not None}')
+                if wallet:
+                    print(f'DEBUG: Wallet found with keys: {list(wallet.keys())}')
+                else:
+                    print(f'DEBUG: No wallet found for user: {user_id}')
+            except Exception as wallet_error:
+                print(f'DEBUG: Wallet lookup failed with error: {str(wallet_error)}')
+                raise wallet_error
+                
+            if not wallet:
+                print(f'DEBUG: No wallet found for user: {user_id}')
+                return jsonify({'success': False, 'message': 'No wallet found. Please create one first.'}), 404
+            
+            print(f'DEBUG: Wallet found, checking account reference...')
+            account_reference = wallet.get('accountReference')
+            print(f'DEBUG: Account reference: {account_reference}')
+            
+            if not account_reference:
+                print(f'DEBUG: No account reference found')
+                return jsonify({'success': False, 'message': 'No existing account reference found.'}), 400
+            
+            # Gate: only allow for fully verified users (BVN + NIN present)
+            print(f'DEBUG: Checking BVN verification...')
+            user_bvn = user_doc.get('bvn')
+            print(f'DEBUG: User BVN exists: {user_bvn is not None}')
+            
+            if not user_bvn:
+                print(f'DEBUG: BVN verification required')
+                return jsonify({
+                    'success': False,
+                    'message': 'BVN verification required before adding additional accounts'
+                }), 400
+            
+            print(f'INFO: User has existing account reference: {account_reference}')
+            print(f'INFO: User is verified with BVN: {user_doc.get("bvn", "")[:3]}***')
+            
+            # Check which banks are already present (avoid duplicate requests)
+            existing_accounts = wallet.get('accounts', [])
+            existing_bank_codes = {acc.get('bankCode') for acc in existing_accounts if acc.get('bankCode')}
+            banks_to_add = [code for code in preferred_banks if code not in existing_bank_codes]
+            
+            if not banks_to_add and not get_all_available_banks:
+                print("All requested banks already present")
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'added': [],
+                        'alreadyPresent': list(existing_bank_codes),
+                        'totalBanks': len(existing_accounts)
+                    },
+                    'message': 'All requested banks are already linked.'
+                }), 200
+            
+            # Authenticate with Monnify
+            monnify_token = call_monnify_auth()
+            if not monnify_token:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to authenticate with payment provider'
+                }), 500
+            
+            # Use the CORRECT Monnify API URL and payload structure from their docs
+            url = f"{MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/{account_reference}/add-linked-accounts"
+            
+            # Prepare payload according to Monnify documentation
+            payload = {
+                'getAllAvailableBanks': get_all_available_banks,
+                'preferredBanks': preferred_banks if not get_all_available_banks else []
+            }
+            
+            print(f'DEBUG: Calling Monnify: {url}')
+            print(f'DEBUG: Payload: {payload}')
+            
+            headers = {
+                'Authorization': f'Bearer {monnify_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            # Use PUT method as shown in Monnify docs
+            response = requests.put(url, headers=headers, json=payload, timeout=30)
+            print(f'DEBUG: Monnify response status: {response.status_code}')
+            print(f'DEBUG: Monnify response: {response.text}')
+            
+            if response.status_code == 200:
+                monnify_data = response.json()
+                
+                if monnify_data.get('requestSuccessful'):
+                    response_body = monnify_data.get('responseBody', {})
+                    accounts = response_body.get('accounts', [])
+                    
+                    # Update wallet document with new accounts
+                    mongo.db.vas_wallets.update_one(
+                        {'userId': ObjectId(user_id)},
+                        {
+                            '$set': {
+                                'accounts': accounts,
+                                'updatedAt': datetime.utcnow()
+                            }
+                        }
+                    )
+                    
+                    print(f'SUCCESS: Successfully updated wallet with {len(accounts)} linked accounts')
+                    
+                    return jsonify({
+                        'success': True,
+                        'data': {
+                            'accounts': accounts,
+                            'totalBanksNow': len(accounts),
+                            'message': f'Successfully added additional bank accounts'
+                        },
+                        'message': 'Additional bank accounts added successfully'
+                    }), 200
+                else:
+                    error_msg = monnify_data.get('responseMessage', 'Failed to add linked accounts')
+                    print(f'ERROR: Monnify error: {error_msg}')
+                    return jsonify({
+                        'success': False,
+                        'message': error_msg
+                    }), 400
+            else:
+                print(f'ERROR: Monnify API error: {response.status_code}')
+                error_msg = response.text
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('responseMessage') or error_data.get('message') or error_msg
+                    
+                    # Handle specific error cases
+                    if response.status_code == 404:
+                        error_msg = 'Reserved account not found. Please contact support.'
+                    elif response.status_code == 400:
+                        if 'not qualified' in error_msg.lower():
+                            error_msg = 'Your account is not qualified to add additional bank accounts. Please complete your profile verification.'
+                        elif 'already exists' in error_msg.lower():
+                            error_msg = 'These bank accounts are already linked to your account.'
+                    elif response.status_code == 403:
+                        error_msg = 'Access denied. Please contact support.'
+                    elif response.status_code >= 500:
+                        error_msg = 'Payment provider is temporarily unavailable. Please try again later.'
+                        
+                except:
+                    pass
+                return jsonify({
+                    'success': False,
+                    'message': f'Failed to add additional bank accounts: {error_msg}'
+                }), response.status_code
+                
+        except Exception as e:
+            print(f'ERROR: Error adding linked accounts: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                'success': False,
+                'message': 'Failed to add additional bank accounts',
+                'error': str(e)
+            }), 500
+    @vas_wallet_bp.route('/reserved-account/transactions', methods=['GET'])
+    @token_required
+    def get_reserved_account_transactions(current_user):
+        """Get user's reserved account transaction history (wallet funding transactions)"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            limit = int(request.args.get('limit', 50))
+            skip = int(request.args.get('skip', 0))
+            
+            # Get only WALLET_FUNDING transactions
+            transactions = list(
+                mongo.db.vas_transactions.find({
+                    'userId': ObjectId(user_id),
+                    'type': 'WALLET_FUNDING'
+                })
+                .sort('createdAt', -1)
+                .skip(skip)
+                .limit(limit)
+            )
+            
+            serialized_transactions = []
+            for txn in transactions:
+                txn_data = serialize_doc(txn)
+                # Ensure createdAt is a string for frontend compatibility
+                txn_data['createdAt'] = txn.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
+                # Add reference and description for frontend display
+                txn_data['reference'] = txn.get('reference', '')
+                txn_data['description'] = f"Wallet Funding - ₦ {txn.get('amount', 0):.2f}"
+                serialized_transactions.append(txn_data)
+            
+            return jsonify({
+                'success': True,
+                'data': serialized_transactions,
+                'message': 'Reserved account transactions retrieved successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error getting reserved account transactions: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to retrieve reserved account transactions',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    # ==================== WEBHOOK ENDPOINT ====================
+    
+    @vas_wallet_bp.route('/webhook', methods=['POST'])
+    def monnify_webhook():
+        """Handle Monnify webhook with HMAC-SHA512 signature verification"""
+        
+        def process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, webhook_data):
+            """Process reserved account funding inline with idempotent logic"""
+            try:
+                # CRITICAL: Check if this transaction was already processed (idempotency)
+                already_processed = mongo.db.vas_transactions.find_one({"reference": transaction_reference})
+                if already_processed:
+                    print(f"WARNING: Duplicate transaction ignored: {transaction_reference}")
+                    return jsonify({'success': True, 'message': 'Already processed'}), 200
+                
+                wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                if not wallet:
+                    print(f'ERROR: Wallet not found for user: {user_id}')
+                    return jsonify({'success': False, 'message': 'Wallet not found'}), 404
+                
+                # Check if user is premium (no deposit fee)
+                user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+                is_premium = False
+                if user:
+                    # CRITICAL FIX: Check multiple premium indicators
+                    # 1. Check subscriptionStatus (standard subscription)
+                    subscription_status = user.get('subscriptionStatus')
+                    if subscription_status == 'active':
+                        is_premium = True
+                    
+                    # 2. Check subscription dates (admin granted or standard)
+                    elif user.get('subscriptionStartDate') and user.get('subscriptionEndDate'):
+                        subscription_end = user.get('subscriptionEndDate')
+                        now = datetime.utcnow()
+                        if subscription_end > now:
+                            is_premium = True
+                            print(f'SUCCESS: User {user_id} is premium via subscription dates (ends: {subscription_end})')
+                    
+                    # 3. Check if user is admin
+                    elif user.get('isAdmin', False):
+                        is_premium = True
+                        print(f'SUCCESS: User {user_id} is premium via admin status')
+                
+                print(f'INFO: Premium check for user {user_id}: {is_premium}')
+                
+                # Apply deposit fee (₦ 30 for non-premium users)
+                deposit_fee = 0.0 if is_premium else VAS_TRANSACTION_FEE
+                amount_to_credit = amount_paid - deposit_fee
+                
+                # Ensure we don't credit negative amounts
+                if amount_to_credit <= 0:
+                    print(f'WARNING: Amount too small after fee: ₦ {amount_paid} - ₦ {deposit_fee} = ₦ {amount_to_credit}')
+                    return jsonify({'success': False, 'message': 'Amount too small to process'}), 400
+                
+                # SAFETY FIRST: Insert transaction record BEFORE updating wallet balance
+                transaction = {
+                    '_id': ObjectId(),
+                    'userId': ObjectId(user_id),
+                    'type': 'WALLET_FUNDING',
+                    'amount': amount_to_credit,
+                    'amountPaid': amount_paid,
+                    'depositFee': deposit_fee,
+                    'reference': transaction_reference,
+                    'transactionReference': transaction_reference,  # CRITICAL: Add this field for unique index
+                    'status': 'SUCCESS',
+                    'provider': 'monnify',
+                    'metadata': webhook_data,
+                    'createdAt': datetime.utcnow()
+                }
+                
+                # Try to insert transaction - if duplicate key error, return success (already processed)
+                try:
+                    mongo.db.vas_transactions.insert_one(transaction)
+                except pymongo.errors.DuplicateKeyError:
+                    print(f"WARNING: Duplicate key error - transaction already exists: {transaction_reference}")
+                    return jsonify({'success': True, 'message': 'Already processed'}), 200
+                
+                # ONLY update wallet balance after successful transaction insert
+                new_balance = wallet.get('balance', 0.0) + amount_to_credit
+                
+                mongo.db.vas_wallets.update_one(
+                    {'userId': ObjectId(user_id)},
+                    {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+                )
+                
+                # Record corporate revenue (₦ 30 fee)
+                if deposit_fee > 0:
+                    corporate_revenue = {
+                        '_id': ObjectId(),
+                        'type': 'SERVICE_FEE',
+                        'category': 'DEPOSIT_FEE',
+                        'amount': deposit_fee,
+                        'userId': ObjectId(user_id),
+                        'relatedTransaction': transaction_reference,
+                        'description': f'Deposit fee from user {user_id}',
+                        'status': 'RECORDED',
+                        'createdAt': datetime.utcnow(),
+                        'metadata': {
+                            'amountPaid': amount_paid,
+                            'amountCredited': amount_to_credit,
+                            'isPremium': is_premium
+                        }
+                    }
+                    mongo.db.corporate_revenue.insert_one(corporate_revenue)
+                    print(f'INFO: Corporate revenue recorded: ₦ {deposit_fee} from user {user_id}')
+                
+                # Send notification
+                try:
+                    notification_id = create_user_notification(
+                        mongo=mongo,
+                        user_id=user_id,
+                        category='wallet',
+                        title='💰 Wallet Funded Successfully',
+                        body=f'₦ {amount_to_credit:,.2f} added to your Liquid Wallet. New balance: ₦ {new_balance:,.2f}',
+                        related_id=transaction_reference,
+                        metadata={
+                            'transaction_type': 'WALLET_FUNDING',
+                            'amount_credited': amount_to_credit,
+                            'deposit_fee': deposit_fee,
+                            'new_balance': new_balance,
+                            'is_premium': is_premium
+                        },
+                        priority='normal'
+                    )
+                    
+                    if notification_id:
+                        print(f'INFO: Wallet funding notification created: {notification_id}')
+                except Exception as e:
+                    print(f'WARNING: Failed to create notification: {str(e)}')
+                
+                print(f'SUCCESS: Wallet Funding: User {user_id}, Paid: ₦ {amount_paid}, Fee: ₦ {deposit_fee}, Credited: ₦ {amount_to_credit}, New Balance: ₦ {new_balance}')
+                return jsonify({'success': True, 'message': 'Wallet funded successfully'}), 200
+                
+            except Exception as e:
+                print(f'ERROR: Error processing wallet funding: {str(e)}')
+                return jsonify({'success': False, 'message': 'Processing failed'}), 500
+        try:
+            # Optional: IP Whitelisting (uncomment for production)
+            # Monnify webhook IP: 35.242.133.146
+            # client_ip = request.headers.get('X-Real-IP', request.remote_addr)
+            # MONNIFY_WEBHOOK_IP = '35.242.133.146'
+            # if client_ip != MONNIFY_WEBHOOK_IP:
+            #     print(f'WARNING: Unauthorized webhook IP: {client_ip}')
+            #     return jsonify({'success': False, 'message': 'Unauthorized'}), 403
+            
+            signature = request.headers.get('monnify-signature', '')
+            payload = request.get_data(as_text=True)
+            
+            # CRITICAL: Verify webhook signature to prevent fake payments
+            computed_signature = hmac.new(
+                MONNIFY_SECRET_KEY.encode(),
+                payload.encode(),
+                hashlib.sha512
+            ).hexdigest()
+            
+            if signature != computed_signature:
+                print(f'WARNING: Invalid webhook signature. Expected: {computed_signature}, Got: {signature}')
+                return jsonify({'success': False, 'message': 'Invalid signature'}), 401
+            
+            data = request.json
+            
+            # Log the raw webhook data for debugging
+            print(f'INFO: Raw Monnify webhook data: {json.dumps(data, indent=2)}')
+            
+            # Handle both old eventType format and new flat format
+            event_type = data.get('eventType')
+            payment_status = data.get('paymentStatus', '').upper()
+            completed = data.get('completed', False)
+            
+            print(f'INFO: Monnify webhook - EventType: {event_type}, Status: {payment_status}, Completed: {completed}')
+            
+            # Process if it's a successful transaction (either format)
+            should_process = (
+                (event_type == 'SUCCESSFUL_TRANSACTION') or 
+                (payment_status == 'PAID' and completed)
+            )
+            
+            if should_process:
+                # Extract transaction reference for VAS detection
+                transaction_reference = ''
+                if 'eventData' in data:
+                    transaction_reference = data['eventData'].get('transactionReference', '')
+                else:
+                    transaction_reference = data.get('transactionReference', '')
+                
+                print(f"INFO: Checking if webhook is for VAS transaction: {transaction_reference}")
+                
+                # Check if this webhook is for an existing VAS transaction (airtime/data)
+                existing_vas_txn = mongo.db.vas_transactions.find_one({
+                    '$or': [
+                        {'requestId': transaction_reference},
+                        {'transactionReference': transaction_reference}
+                    ],
+                    'type': {'$in': ['AIRTIME', 'DATA']}
+                })
+                
+                if existing_vas_txn:
+                    # This is a VAS confirmation - update existing transaction, don't create new one
+                    print(f'INFO: VAS confirmation webhook detected for: {transaction_reference}')
+                    print(f'   Transaction ID: {existing_vas_txn["_id"]}')
+                    print(f'   Type: {existing_vas_txn.get("type")}')
+                    print(f'   Current Status: {existing_vas_txn.get("status")}')
+                    
+                    # Update existing transaction with webhook confirmation
+                    update_data = {
+                        'providerConfirmed': True,
+                        'webhookReceived': datetime.utcnow(),
+                        'webhookData': data,
+                        'updatedAt': datetime.utcnow()
+                    }
+                    
+                    # If transaction is still PENDING, update to SUCCESS
+                    if existing_vas_txn.get('status') == 'PENDING':
+                        update_data['status'] = 'SUCCESS'
+                        print(f'SUCCESS: Updated PENDING VAS transaction to SUCCESS: {transaction_reference}')
+                    
+                    mongo.db.vas_transactions.update_one(
+                        {'_id': existing_vas_txn['_id']},
+                        {'$set': update_data}
+                    )
+                    
+                    print(f'SUCCESS: VAS confirmation processed - no duplicate transaction created')
+                    return jsonify({'success': True, 'message': 'VAS confirmation processed'}), 200
+                
+                # If we reach here, it's not a VAS confirmation - proceed with wallet funding logic
+                print(f'INFO: Processing as wallet funding (not VAS confirmation)')
+                
+                # IMPROVED EXTRACTION - handles real Monnify reserved account format
+                # Default values
+                account_ref = None
+                amount_paid = 0.0
+                transaction_reference = ''
+                payment_reference = ''
+                customer_email = ''
+                
+                print(f"DEBUG full payload top-level keys: {list(data.keys())}")
+                
+                # 1. Classic Monnify format (most common for reserved accounts)
+                if 'eventData' in data:
+                    event_data = data['eventData']
+                    print(f"DEBUG eventData keys: {list(event_data.keys())}")
+                    
+                    amount_paid = float(event_data.get('amountPaid', 0))
+                    transaction_reference = event_data.get('transactionReference', '')
+                    payment_reference = event_data.get('paymentReference', '')
+                    
+                    # Customer email (fallback)
+                    customer = event_data.get('customer', {})
+                    customer_email = customer.get('email', '')
+                    
+                    # Critical: account reference is usually here
+                    product = event_data.get('product', {})
+                    if product.get('type') == 'RESERVED_ACCOUNT':
+                        account_ref = product.get('reference', '')
+                        print(f"DEBUG: Found reserved account reference! eventData.product.reference = '{account_ref}'")
+                
+                # 2. Possible flat/newer format (less common, but we check anyway)
+                if not account_ref:
+                    account_ref = data.get('accountReference', '')
+                    if account_ref:
+                        print(f"DEBUG: Found top-level accountReference = '{account_ref}'")
+                        amount_paid = float(data.get('amountPaid', amount_paid))
+                        transaction_reference = data.get('transactionReference', transaction_reference)
+                        payment_reference = data.get('paymentReference', payment_reference)
+                        customer_email = data.get('customerEmail', customer_email) or data.get('customer', {}).get('email', '')
+                
+                # 3. Log what we actually got
+                print(f"DEBUG extracted values:")
+                print(f"  - amount_paid          : ₦ {amount_paid}")
+                print(f"  - transaction_reference: {transaction_reference}")
+                print(f"  - payment_reference    : {payment_reference}")
+                print(f"  - account_ref          : '{account_ref}'")
+                print(f"  - customer_email       : {customer_email}")
+                
+                if amount_paid <= 0:
+                    print("WARNING: Zero or negative amount - ignoring")
+                    return jsonify({'success': True, 'message': 'Zero amount ignored'}), 200
+                
+                # Now try to identify user and process
+                user_id = None
+                pending_txn = None
+                
+                # Priority 1: From account reference (preferred for reserved accounts)
+                if account_ref:
+                    cleaned = account_ref.replace(" ", "").replace("-", "").replace("_", "").upper()
+                    if cleaned.startswith('FICORE'):
+                        user_part = cleaned[len('FICORE'):]
+                        user_id = user_part.lstrip('0123456789') if user_part.isdigit() else user_part
+                        print(f"SUCCESS: Matched FICORE prefix! extracted user_id: {user_id}")
+                
+                # Priority 2: Fallback to email if we have it and no user yet
+                if not user_id and customer_email:
+                    user_doc = mongo.db.users.find_one({'email': customer_email})
+                    if user_doc:
+                        user_id = str(user_doc['_id'])
+                        print(f"SUCCESS: Fallback: found user via email {customer_email}! {user_id}")
+                
+                # Priority 3: Try pending transaction matching (KYC payments only)
+                if not user_id:
+                    # Only check for KYC verification payments (₦ 70)
+                    if amount_paid >= 70.0:
+                        pending_txn = mongo.db.vas_transactions.find_one({
+                            'monnifyTransactionReference': transaction_reference,
+                            'status': 'PENDING_PAYMENT',
+                            'type': 'KYC_VERIFICATION'
+                        })
+                        
+                        if not pending_txn and payment_reference and payment_reference.startswith('VER_'):
+                            pending_txn = mongo.db.vas_transactions.find_one({
+                                'paymentReference': payment_reference,
+                                'status': 'PENDING_PAYMENT',
+                                'type': 'KYC_VERIFICATION'
+                            })
+                        
+                        if not pending_txn and transaction_reference.startswith('FICORE_QP_'):
+                            pending_txn = mongo.db.vas_transactions.find_one({
+                                'transactionReference': transaction_reference,
+                                'status': 'PENDING_PAYMENT',
+                                'type': 'KYC_VERIFICATION'
+                            })
+                        
+                        if pending_txn:
+                            user_id = str(pending_txn['userId'])
+                            print(f"SUCCESS: Found pending KYC verification transaction! user_id: {user_id}")
+                
+                # Decide how to process based on what we found
+                if user_id:
+                    # We have a user! treat as wallet funding (reserved account style)
+                    print(f"Processing as direct reserved account funding for user {user_id}")
+                    
+                    # Comprehensive idempotency check - any status
+                    existing = mongo.db.vas_transactions.find_one({
+                        'reference': transaction_reference
+                    })
+                    
+                    if existing:
+                        if existing.get('status') == 'SUCCESS':
+                            print(f"Duplicate SUCCESS webhook ignored: {transaction_reference}")
+                            return jsonify({'success': True, 'message': 'Already processed'}), 200
+                        else:
+                            print(f"Found existing transaction with status {existing.get('status')}: {transaction_reference}")
+                            print("Updating existing transaction to SUCCESS and crediting wallet...")
+                            
+                            # Update existing transaction to SUCCESS
+                            mongo.db.vas_transactions.update_one(
+                                {'_id': existing['_id']},
+                                {'$set': {
+                                    'status': 'SUCCESS',
+                                    'amountPaid': amount_paid,
+                                    'provider': 'monnify',
+                                    'metadata': data,
+                                    'completedAt': datetime.utcnow()
+                                }}
+                            )
+                            
+                            # Now credit the wallet (call the inline function but skip the insert part)
+                            return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
+                    
+                    return process_reserved_account_funding_inline(user_id, amount_paid, transaction_reference, data)
+                
+                elif pending_txn:
+                    # KYC verification transaction
+                    txn_type = pending_txn.get('type')
+                    print(f"Found pending transaction type: {txn_type}")
+                    
+                    if txn_type == 'KYC_VERIFICATION':
+                        # Process KYC verification payment
+                        if amount_paid < 70.0:
+                            print(f'WARNING: KYC verification payment insufficient: ₦ {amount_paid} < ₦ 70')
+                            return jsonify({'success': False, 'message': 'Insufficient payment amount'}), 400
+                        
+                        # Update transaction status
+                        mongo.db.vas_transactions.update_one(
+                            {'_id': pending_txn['_id']},
+                            {'$set': {
+                                'status': 'SUCCESS',
+                                'amountPaid': amount_paid,
+                                'reference': transaction_reference,
+                                'provider': 'monnify',
+                                'metadata': data,
+                                'completedAt': datetime.utcnow()
+                            }}
+                        )
+                        
+                        # Record corporate revenue (₦ 70 KYC fee)
+                        corporate_revenue = {
+                            '_id': ObjectId(),
+                            'type': 'SERVICE_FEE',
+                            'category': 'KYC_VERIFICATION',
+                            'amount': 70.0,
+                            'userId': ObjectId(user_id),
+                            'relatedTransaction': transaction_reference,
+                            'description': f'KYC verification fee from user {user_id}',
+                            'status': 'RECORDED',
+                            'createdAt': datetime.utcnow(),
+                            'metadata': {
+                                'amountPaid': amount_paid,
+                                'verificationFee': 70.0
+                            }
+                        }
+                        mongo.db.corporate_revenue.insert_one(corporate_revenue)
+                        print(f'INFO: KYC verification revenue recorded: ₦ 70 from user {user_id}')
+                        
+                        print(f'SUCCESS: KYC Verification Payment: User {user_id}, Paid: ₦ {amount_paid}, Fee: ₦ 70')
+                        return jsonify({'success': True, 'message': 'KYC verification payment processed successfully'}), 200
+                    
+                    elif txn_type == 'WALLET_FUNDING':
+                        return process_reserved_account_funding_inline(str(pending_txn['userId']), amount_paid, transaction_reference, data)
+                    
+                    else:
+                        print(f"Unhandled pending txn type: {txn_type}")
+                        return jsonify({'success': False, 'message': 'Unhandled transaction type'}), 400
+                
+                else:
+                    print("Could not identify user or pending transaction")
+                    # Still return 200 to Monnify - don't block their retries
+                    return jsonify({'success': True, 'message': 'Acknowledged but unprocessed'}), 200
+            
+            # If payment status is not PAID or not completed, just acknowledge
+            else:
+                print(f'INFO: Webhook received but not processed - Status: {payment_status}, Completed: {completed}')
+                return jsonify({'success': True, 'message': 'Webhook received'}), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error processing webhook: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Webhook processing failed',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    return vas_wallet_bp
