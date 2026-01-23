@@ -82,6 +82,9 @@ def init_atomic_entries_blueprint(mongo, token_required, serialize_doc):
                     'errors': errors
                 }), 400
             
+            # Import auto-population utility
+            from ..utils.expense_utils import auto_populate_expense_fields
+            
             # Validate payment method
             raw_payment = data.get('paymentMethod')
             normalized_payment = normalize_payment_method(raw_payment) if raw_payment is not None else 'cash'
@@ -91,6 +94,25 @@ def init_atomic_entries_blueprint(mongo, token_required, serialize_doc):
                     'message': 'Invalid payment method',
                     'errors': {'paymentMethod': ['Unrecognized payment method']}
                 }), 400
+            
+            # STEP 3: Create expense data
+            expense_data = {
+                'userId': current_user['_id'],
+                'amount': float(data['amount']),
+                'description': data['description'],
+                'category': data['category'],
+                'date': datetime.fromisoformat(data.get('date', datetime.utcnow().isoformat()).replace('Z', '')),
+                'budgetId': data.get('budgetId'),
+                'tags': data.get('tags', []),
+                'paymentMethod': normalized_payment,
+                'location': data.get('location', ''),
+                'notes': data.get('notes', ''),
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow()
+            }
+            
+            # Auto-populate title and description if missing
+            expense_data = auto_populate_expense_fields(expense_data)
             
             # STEP 2: Check user status (Premium/Admin/Free)
             user = atomic_entries_bp.mongo.db.users.find_one({'_id': current_user['_id']})

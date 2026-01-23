@@ -171,6 +171,9 @@ def create_expense():
                     'errors': {'paymentMethod': ['Unrecognized payment method']}
                 }), 400
 
+            # Import auto-population utility
+            from ..utils.expense_utils import auto_populate_expense_fields
+            
             expense_data = {
                 'userId': current_user['_id'],
                 'amount': float(data['amount']),
@@ -185,6 +188,9 @@ def create_expense():
                 'createdAt': datetime.utcnow(),
                 'updatedAt': datetime.utcnow()
             }
+            
+            # Auto-populate title and description if missing
+            expense_data = auto_populate_expense_fields(expense_data)
            
             result = expenses_bp.mongo.db.expenses.insert_one(expense_data)
             expense_id = str(result.inserted_id)
