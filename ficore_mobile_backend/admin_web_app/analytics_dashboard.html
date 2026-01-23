@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>FiCore Analytics Dashboard</title>
     <link rel="stylesheet" href="responsive.css">
     <link rel="stylesheet" href="backend_switcher.css">
@@ -679,6 +682,9 @@
     </div>
     
     <script>
+        // DEBUG: Script loading check
+        console.log('🔧 ANALYTICS DASHBOARD SCRIPT LOADING - Version 2.0');
+        
         // Configuration
         const API_BASE_URL = window.location.origin;
         
@@ -1532,6 +1538,9 @@
         
         // Rate Limit Monitoring Functions
         async function loadRateLimitData() {
+            console.log('⚠️ loadRateLimitData temporarily disabled for debugging');
+            return;
+            /*
             try {
                 const hours = document.getElementById('rateLimitTimeframe').value;
                 
@@ -1646,6 +1655,7 @@
                 document.getElementById('endpoint-stats-body').innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: #6B7280;">Rate limit monitoring temporarily unavailable</td></tr>';
                 document.getElementById('violations-body').innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #6B7280;">Rate limit monitoring temporarily unavailable</td></tr>';
             }
+            */
         }
         
         async function viewUserApiUsage(userId) {
