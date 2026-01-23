@@ -1395,7 +1395,7 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
             
             # Get Income transactions
             income_transactions = list(
-                mongo.db.income.find({'userId': ObjectId(user_id)})
+                mongo.db.incomes.find({'userId': ObjectId(user_id)})
                 .sort('dateReceived', -1)
             )
             
