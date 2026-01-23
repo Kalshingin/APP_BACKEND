@@ -1469,6 +1469,18 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
             )
             
+            # 🚀 INSTANT BALANCE UPDATE: Push real-time update to frontend
+            push_balance_update(user_id, {
+                'type': 'balance_update',
+                'new_balance': new_balance,
+                'transaction_reference': request_id,
+                'amount_debited': total_amount,
+                'transaction_type': 'AIRTIME_PURCHASE',
+                'network': network,
+                'phone_number': phone_number[-4:] + '****',
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            })
+            
             # Update transaction to SUCCESS
             mongo.db.vas_transactions.update_one(
                 {'_id': transaction_id},
@@ -1664,23 +1676,25 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 subscription_plan = current_user.get('subscriptionPlan', 'premium')
                 user_tier = subscription_plan.lower()
             
-            # Calculate dynamic pricing
-            pricing_result = calculate_vas_price(
-                mongo.db, 'data', network, amount, user_tier, data_plan_id, user_id
-            )
+            # CRITICAL: Data plans should be sold at face value - NO MARGINS
+            # Users should pay exactly what they see in the plan selection
+            selling_price = amount  # Sell at exactly the displayed price
+            cost_price = amount     # Cost is the same as selling price
+            margin = 0.0           # No margin for data plans
+            savings_message = ''   # No savings message needed
             
-            selling_price = pricing_result['selling_price']
-            cost_price = pricing_result['cost_price']
-            margin = pricing_result['margin']
-            savings_message = pricing_result['savings_message']
+            print(f'💰 DATA PRICING (NO MARGIN POLICY):')
+            print(f'   Plan Amount: ₦{amount}')
+            print(f'   User Pays: ₦{selling_price} (EXACT MATCH)')
+            print(f'   No Margin Added: ₦{margin}')
+            print(f'   Policy: Sell data at face value')
             
             # CRITICAL: Plan validation to prevent mismatches
-            print(f'💰 PRICING CALCULATION:')
-            print(f'   Original Amount: ₦{amount}')
-            print(f'   Selling Price: ₦{selling_price}')
-            print(f'   Cost Price: ₦{cost_price}')
-            print(f'   Margin: ₦{margin}')
-            print(f'   Strategy: {pricing_result["strategy_used"]}')
+            print(f'💰 DATA PRICING (NO MARGIN POLICY):')
+            print(f'   Plan Amount: ₦{amount}')
+            print(f'   User Pays: ₦{selling_price} (EXACT MATCH)')
+            print(f'   No Margin Added: ₦{margin}')
+            print(f'   Policy: Sell data at face value')
             
             # CRITICAL: Validate plan exists in provider systems
             plan_validation_result = validate_data_plan_exists(network, data_plan_id, amount)
@@ -1864,6 +1878,19 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
             )
             
+            # 🚀 INSTANT BALANCE UPDATE: Push real-time update to frontend
+            push_balance_update(user_id, {
+                'type': 'balance_update',
+                'new_balance': new_balance,
+                'transaction_reference': request_id,
+                'amount_debited': total_amount,
+                'transaction_type': 'DATA_PURCHASE',
+                'network': network,
+                'phone_number': phone_number[-4:] + '****',
+                'plan_name': data_plan_name,
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            })
+            
             # Update transaction to SUCCESS
             mongo.db.vas_transactions.update_one(
                 {'_id': transaction_id},
@@ -1877,32 +1904,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 }
             )
             
-            # Record corporate revenue (margin earned)
-            if margin > 0:
-                corporate_revenue = {
-                    '_id': ObjectId(),
-                    'type': 'VAS_MARGIN',
-                    'category': 'DATA_MARGIN',
-                    'amount': margin,
-                    'userId': ObjectId(user_id),
-                    'relatedTransaction': str(transaction_id),
-                    'description': f'Data margin from user {user_id} - {network} {data_plan_name}',
-                    'status': 'RECORDED',
-                    'createdAt': datetime.utcnow(),
-                    'metadata': {
-                        'network': network,
-                        'planName': data_plan_name,
-                        'planId': data_plan_id,
-                        'originalAmount': amount,
-                        'sellingPrice': selling_price,
-                        'costPrice': cost_price,
-                        'userTier': user_tier,
-                        'strategy': pricing_result['strategy_used'],
-                        'emergencyPricing': is_emergency_pricing
-                    }
-                }
-                mongo.db.corporate_revenue.insert_one(corporate_revenue)
-                print(f'INFO: Corporate revenue recorded: ₦ {margin} from data sale to user {user_id}')
+            # NO CORPORATE REVENUE RECORDING - Data plans sold at cost with no margin
             
             # TAG EMERGENCY TRANSACTIONS FOR RECOVERY
             if is_emergency_pricing:
@@ -1942,26 +1944,26 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 discount_applied
             )
             
-            # Auto-create expense entry (auto-bookkeeping)
+            # Auto-create expense entry (auto-bookkeeping) - EXACT AMOUNT ONLY
             expense_entry = {
                 '_id': ObjectId(),
                 'userId': ObjectId(user_id),
-                'amount': amount,  # Record actual purchase amount (₦800, not ₦839) - fees eliminated
+                'amount': amount,  # Record EXACT plan amount (no margins added)
                 'category': 'Utilities',
-                'description': retention_description,  # Use retention-focused description
+                'description': f'Data - {network} {data_plan_name} for {phone_number[-4:]}****',
                 'date': datetime.utcnow(),
                 'tags': ['VAS', 'Data', network],
                 'vasTransactionId': transaction_id,
                 'metadata': {
                     'planName': data_plan_name,
+                    'planId': data_plan_id,
+                    'phoneNumber': phone_number,
+                    'network': network,
                     'originalAmount': amount,
-                    'actualCost': amount,  # Actual cost is now the purchase amount (fees eliminated)
+                    'actualCost': amount,  # Exact amount paid
                     'userTier': user_tier,
-                    'savingsMessage': savings_message,
-                    'discountApplied': discount_applied,  # Track discount for analytics
-                    'retentionMessaging': True,  # Flag for retention analytics
-                    'feesEliminated': True,  # Flag to indicate VAS purchase fees have been eliminated
-                    'sellingPriceForReference': selling_price  # Keep for reference but don't use for expense amount
+                    'noMarginPolicy': True,  # Flag indicating no margin was added
+                    'pricingTransparency': 'User pays exactly what they see in plan selection'
                 },
                 'createdAt': datetime.utcnow(),
                 'updatedAt': datetime.utcnow()
@@ -1996,28 +1998,28 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 }
             }
 
-            print(f'SUCCESS: Data purchase complete: User {user_id}, Plan: {data_plan_name}, Original: ₦ {amount}, Charged: ₦ {selling_price}, Margin: ₦ {margin}, Provider: {provider}')
+            print(f'SUCCESS: Data purchase complete: User {user_id}, Plan: {data_plan_name}, Amount: ₦{amount} (NO MARGIN), Provider: {provider}')
             
             return jsonify({
                 'success': True,
                 'data': {
                     'transactionId': str(transaction_id),
                     'requestId': request_id,
-                    'phoneNumber': phone_number,  # FIX: Include phone number in response
-                    'network': network,  # FIX: Include network in response
+                    'phoneNumber': phone_number,
+                    'network': network,
                     'planName': data_plan_name,
-                    'originalAmount': amount,
-                    'amountCharged': selling_price,
-                    'margin': margin,
+                    'planId': data_plan_id,
+                    'amount': amount,  # User pays exactly what they see
+                    'amountCharged': amount,  # Same as amount - no margin
+                    'margin': 0.0,  # No margin for data plans
                     'newBalance': new_balance,
                     'provider': provider,
                     'userTier': user_tier,
-                    'savingsMessage': savings_message,
-                    'pricingStrategy': pricing_result['strategy_used'],
+                    'pricingPolicy': 'No margin - pay exactly what you see',
                     'expenseRecorded': True,
-                    'retentionData': retention_data  # NEW: Frontend trust data
+                    'transparentPricing': True
                 },
-                'message': f'Data purchased successfully! {savings_message}' if savings_message else 'Data purchased successfully!'
+                'message': f'Data purchased successfully! You paid exactly ₦{amount} as displayed.'
             }), 200
             
         except Exception as e:
