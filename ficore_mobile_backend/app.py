@@ -41,9 +41,9 @@ from blueprints.atomic_entries import init_atomic_entries_blueprint
 from blueprints.reports import init_reports_blueprint
 from blueprints.voice_reporting import init_voice_reporting_blueprint
 # VAS modules - broken down from monolithic blueprint
-from vas_wallet import init_vas_wallet_blueprint
-from vas_purchase import init_vas_purchase_blueprint
-from vas_bills import init_vas_bills_blueprint
+from blueprints.vas_wallet import init_vas_wallet_blueprint
+from blueprints.vas_purchase import init_vas_purchase_blueprint
+from blueprints.vas_bills import init_vas_bills_blueprint
 
 # Import database models
 from models import DatabaseInitializer
