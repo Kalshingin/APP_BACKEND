@@ -1542,11 +1542,22 @@
                         const overview = overviewResponse.data.overview;
                         document.getElementById('rl-total-calls').textContent = overview.totalCalls.toLocaleString();
                         document.getElementById('rl-calls-per-min').textContent = `${overview.callsPerMinute} calls/min`;
-                    document.getElementById('rl-limit-hits').textContent = overview.rateLimitHits.toLocaleString();
-                    document.getElementById('rl-limit-rate').textContent = `${overview.rateLimitRate}% of calls`;
-                    document.getElementById('rl-error-rate').textContent = `${overview.errorRate}%`;
-                    document.getElementById('rl-error-count').textContent = `${overview.errorCalls.toLocaleString()} errors`;
-                    document.getElementById('rl-avg-response').textContent = `${overview.avgResponseTime}ms`;
+                        document.getElementById('rl-limit-hits').textContent = overview.rateLimitHits.toLocaleString();
+                        document.getElementById('rl-limit-rate').textContent = `${overview.rateLimitRate}% of calls`;
+                        document.getElementById('rl-error-rate').textContent = `${overview.errorRate}%`;
+                        document.getElementById('rl-error-count').textContent = `${overview.errorCalls.toLocaleString()} errors`;
+                        document.getElementById('rl-avg-response').textContent = `${overview.avgResponseTime}ms`;
+                    }
+                } catch (overviewError) {
+                    console.error('Error loading rate limit overview:', overviewError);
+                    // Set fallback values for overview metrics
+                    document.getElementById('rl-total-calls').textContent = '0';
+                    document.getElementById('rl-calls-per-min').textContent = '0 calls/min';
+                    document.getElementById('rl-limit-hits').textContent = '0';
+                    document.getElementById('rl-limit-rate').textContent = '0% of calls';
+                    document.getElementById('rl-error-rate').textContent = '0%';
+                    document.getElementById('rl-error-count').textContent = '0 errors';
+                    document.getElementById('rl-avg-response').textContent = '0ms';
                 }
                 
                 // Load heavy users
