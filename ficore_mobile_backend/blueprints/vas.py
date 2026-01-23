@@ -1624,13 +1624,16 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             van_data = van_response.json()['responseBody']
             print(f"✅ Monnify account created successfully with {len(van_data.get('accounts', []))} banks")
             
-            # Update user profile with verified information
+            # Update user profile with KYC data including BVN/NIN
             profile_update = {
                 'phone': phone_number,  # Save phone number to profile
                 'bvn': bvn,          # Save BVN (for future reference)
                 'nin': nin,          # Save NIN (for future reference)
                 'kycStatus': 'verified',  # Mark KYC as completed
                 'kycVerifiedAt': datetime.utcnow(),
+                'bvnVerified': True,
+                'ninVerified': True,
+                'verificationStatus': 'VERIFIED',
                 'updatedAt': datetime.utcnow()
             }
             
@@ -1639,13 +1642,13 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             if len(user_name) > len(current_display_name):
                 profile_update['displayName'] = user_name
             
-            # Update user profile
+            # Update user profile (single update with all data)
             mongo.db.users.update_one(
                 {'_id': ObjectId(user_id)},
                 {'$set': profile_update}
             )
             
-            print(f"✅ Updated user profile with KYC data: phone={phone_number}, KYC=verified")
+            print(f"✅ Updated user profile with KYC data: phone={phone_number}, BVN/NIN stored, KYC=verified")
             
             # Create wallet record with KYC verification
             wallet_data = {
@@ -1666,18 +1669,6 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
             }
             
             mongo.db.vas_wallets.insert_one(wallet_data)
-            
-            # Update user profile with provided phone number
-            profile_update = {
-                'phone': phone_number,  # Save phone number to profile
-                'updatedAt': datetime.utcnow()
-            }
-            
-            # Update user profile
-            mongo.db.users.update_one(
-                {'_id': ObjectId(user_id)},
-                {'$set': profile_update}
-            )
             
             # Record business expense for account creation (business absorbs verification costs)
             business_expense = {
@@ -1886,6 +1877,24 @@ def init_vas_blueprint(mongo, token_required, serialize_doc):
                 {'$set': {'status': 'confirmed', 'updatedAt': datetime.utcnow()}}
             )
             
+            # CRITICAL FIX: Update user profile with BVN/NIN to prevent future linked account issues
+            user_profile_update = {
+                'bvn': verification['bvn'],
+                'nin': verification['nin'],
+                'kycStatus': 'verified',
+                'kycVerifiedAt': datetime.utcnow(),
+                'bvnVerified': True,
+                'ninVerified': True,
+                'verificationStatus': 'VERIFIED',
+                'updatedAt': datetime.utcnow()
+            }
+            
+            mongo.db.users.update_one(
+                {'_id': ObjectId(user_id)},
+                {'$set': user_profile_update}
+            )
+            
+            print(f'✅ Updated user profile with BVN/NIN verification: {user_id}')
             print(f'✅ Reserved account created for user {user_id}')
             
             return jsonify({
