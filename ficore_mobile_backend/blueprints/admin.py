@@ -4428,5 +4428,182 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                 'message': 'Failed to get wallet transactions',
                 'errors': {'general': [str(e)]}
             }), 500
+
+    @admin_bp.route('/users/<user_id>/wallet/refund', methods=['POST'])
+    @token_required
+    @admin_required
+    def process_admin_refund(current_user, user_id):
+        """Process admin refund for VAS transaction issues"""
+        try:
+            data = request.get_json()
+            
+            # Validate required fields
+            required_fields = ['amount', 'reason']
+            for field in required_fields:
+                if field not in data:
+                    return jsonify({
+                        'success': False,
+                        'message': f'Missing required field: {field}'
+                    }), 400
+
+            amount = float(data['amount'])
+            reason = data['reason'].strip()
+            reference_transaction_id = data.get('referenceTransactionId', '')
+            
+            # Validate inputs
+            if amount <= 0:
+                return jsonify({
+                    'success': False,
+                    'message': 'Refund amount must be greater than 0'
+                }), 400
+                
+            if len(reason) < 10:
+                return jsonify({
+                    'success': False,
+                    'message': 'Reason must be at least 10 characters'
+                }), 400
+
+            # Validate user exists
+            user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+            if not user:
+                return jsonify({
+                    'success': False,
+                    'message': 'User not found'
+                }), 404
+
+            # Get or create user's wallet
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                # Create wallet if it doesn't exist
+                wallet_data = {
+                    '_id': ObjectId(),
+                    'userId': ObjectId(user_id),
+                    'balance': 0.0,
+                    'accountName': user.get('displayName', f"{user.get('firstName', '')} {user.get('lastName', '')}").strip(),
+                    'status': 'ACTIVE',
+                    'createdAt': datetime.utcnow(),
+                    'updatedAt': datetime.utcnow()
+                }
+                mongo.db.vas_wallets.insert_one(wallet_data)
+                wallet = wallet_data
+
+            # Calculate new balance
+            current_balance = wallet.get('balance', 0.0)
+            new_balance = current_balance + amount
+
+            # Update wallet balance
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'balance': new_balance,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+
+            # Create refund transaction record
+            refund_transaction = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'type': 'ADMIN_REFUND',
+                'category': 'REFUND_CORRECTION',
+                'amount': amount,
+                'balanceBefore': current_balance,
+                'balanceAfter': new_balance,
+                'status': 'SUCCESS',
+                'description': f'Admin refund: {reason}',
+                'referenceTransactionId': reference_transaction_id,
+                'processedBy': current_user['_id'],
+                'processedByName': current_user.get('displayName', 'Admin'),
+                'createdAt': datetime.utcnow(),
+                'metadata': {
+                    'refundType': 'admin_manual',
+                    'adminId': str(current_user['_id']),
+                    'adminName': current_user.get('displayName', 'Admin'),
+                    'adminEmail': current_user.get('email', ''),
+                    'reason': reason,
+                    'referenceTransactionId': reference_transaction_id,
+                    'processedAt': datetime.utcnow().isoformat() + 'Z'
+                }
+            }
+            
+            mongo.db.vas_transactions.insert_one(refund_transaction)
+
+            # Create audit log entry
+            audit_entry = {
+                '_id': ObjectId(),
+                'adminId': current_user['_id'],
+                'adminEmail': current_user['email'],
+                'action': 'wallet_refund',
+                'targetUserId': ObjectId(user_id),
+                'targetUserEmail': user['email'],
+                'amount': amount,
+                'reason': reason,
+                'referenceTransactionId': reference_transaction_id,
+                'balanceBefore': current_balance,
+                'balanceAfter': new_balance,
+                'timestamp': datetime.utcnow(),
+                'details': {
+                    'refund_amount': amount,
+                    'wallet_balance_before': current_balance,
+                    'wallet_balance_after': new_balance,
+                    'transaction_id': str(refund_transaction['_id']),
+                    'reference_transaction': reference_transaction_id
+                }
+            }
+            
+            mongo.db.admin_actions.insert_one(audit_entry)
+
+            # Record corporate expense (refunds are expenses for the company)
+            corporate_expense = {
+                '_id': ObjectId(),
+                'type': 'CUSTOMER_REFUND',
+                'category': 'VAS_REFUND',
+                'amount': amount,
+                'userId': ObjectId(user_id),
+                'relatedTransaction': str(refund_transaction['_id']),
+                'description': f'Customer refund - {reason}',
+                'status': 'RECORDED',
+                'processedBy': current_user['_id'],
+                'createdAt': datetime.utcnow(),
+                'metadata': {
+                    'refundAmount': amount,
+                    'adminId': str(current_user['_id']),
+                    'adminName': current_user.get('displayName', 'Admin'),
+                    'reason': reason,
+                    'referenceTransactionId': reference_transaction_id
+                }
+            }
+            mongo.db.corporate_expenses.insert_one(corporate_expense)
+            print(f'💸 Corporate expense recorded: ₦{amount} refund to user {user_id} - Reason: {reason}')
+
+            return jsonify({
+                'success': True,
+                'data': {
+                    'transactionId': str(refund_transaction['_id']),
+                    'amount': amount,
+                    'previousBalance': current_balance,
+                    'newBalance': new_balance,
+                    'reason': reason,
+                    'referenceTransactionId': reference_transaction_id,
+                    'processedBy': current_user.get('displayName', 'Admin'),
+                    'processedAt': datetime.utcnow().isoformat() + 'Z'
+                },
+                'message': f'Refund of ₦{amount:,.2f} processed successfully'
+            })
+
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'message': 'Invalid amount format'
+            }), 400
+        except Exception as e:
+            print(f"Error processing admin refund: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': 'Failed to process refund',
+                'errors': {'general': [str(e)]}
+            }), 500
          
     return admin_bp

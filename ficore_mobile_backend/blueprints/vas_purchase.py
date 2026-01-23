@@ -1639,6 +1639,16 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             data_plan_name = data.get('dataPlanName', '')
             amount = float(data.get('amount', 0))
             
+            # CRITICAL: Enhanced logging for plan mismatch debugging
+            print(f'🔍 DATA PLAN PURCHASE REQUEST:')
+            print(f'   User: {current_user.get("email", "unknown")}')
+            print(f'   Phone: {phone_number}')
+            print(f'   Network: {network}')
+            print(f'   Plan ID: {data_plan_id}')
+            print(f'   Plan Name: {data_plan_name}')
+            print(f'   Amount: ₦{amount}')
+            print(f'   Full Request: {data}')
+            
             if not phone_number or not network or not data_plan_id or amount <= 0:
                 return jsonify({
                     'success': False,
@@ -1663,6 +1673,31 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             cost_price = pricing_result['cost_price']
             margin = pricing_result['margin']
             savings_message = pricing_result['savings_message']
+            
+            # CRITICAL: Plan validation to prevent mismatches
+            print(f'💰 PRICING CALCULATION:')
+            print(f'   Original Amount: ₦{amount}')
+            print(f'   Selling Price: ₦{selling_price}')
+            print(f'   Cost Price: ₦{cost_price}')
+            print(f'   Margin: ₦{margin}')
+            print(f'   Strategy: {pricing_result["strategy_used"]}')
+            
+            # CRITICAL: Validate plan exists in provider systems
+            plan_validation_result = validate_data_plan_exists(network, data_plan_id, amount)
+            if not plan_validation_result['valid']:
+                print(f'❌ PLAN VALIDATION FAILED: {plan_validation_result["error"]}')
+                return jsonify({
+                    'success': False,
+                    'message': f'Data plan validation failed: {plan_validation_result["error"]}',
+                    'errors': {'general': [f'Plan {data_plan_id} not available for {network}']},
+                    'user_message': {
+                        'title': '⚠️ Plan Not Available',
+                        'message': f'The selected {network} data plan is currently unavailable. Please try a different plan or network.',
+                        'type': 'plan_unavailable',
+                        'support_message': 'This plan may have been discontinued or is temporarily unavailable.',
+                        'retry_after': '5 minutes',
+                    }
+                }), 400
             
             # EMERGENCY PRICING DETECTION
             emergency_multiplier = 2.0
@@ -1733,24 +1768,81 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             provider = 'monnify'
             error_message = ''
             api_response = None
+            actual_plan_delivered = None
             
             try:
                 # Try Monnify first (primary provider)
+                print(f'🔄 ATTEMPTING MONNIFY DATA PURCHASE:')
+                print(f'   Network: {network}')
+                print(f'   Plan ID: {data_plan_id}')
+                print(f'   Phone: {phone_number}')
+                
                 api_response = call_monnify_data(network, data_plan_id, phone_number, request_id)
+                
+                # CRITICAL: Validate that delivered plan matches requested plan
+                plan_match_result = validate_delivered_plan(api_response, data_plan_id, data_plan_name, amount)
+                if not plan_match_result['matches']:
+                    print(f'❌ PLAN MISMATCH DETECTED IN MONNIFY RESPONSE:')
+                    print(f'   Requested: {data_plan_name} (₦{amount})')
+                    print(f'   Delivered: {plan_match_result["delivered_plan"]}')
+                    
+                    # Log mismatch for investigation
+                    log_plan_mismatch(user_id, 'monnify', {
+                        'requested_plan_id': data_plan_id,
+                        'requested_plan_name': data_plan_name,
+                        'requested_amount': amount,
+                        'delivered_plan': plan_match_result['delivered_plan'],
+                        'api_response': api_response,
+                        'transaction_id': str(transaction_id)
+                    })
+                    
+                    raise Exception(f'Plan mismatch: Requested {data_plan_name} but got {plan_match_result["delivered_plan"]}')
+                
+                actual_plan_delivered = plan_match_result['delivered_plan']
                 success = True
-                print(f'SUCCESS: Monnify data purchase successful: {request_id}')
+                print(f'✅ MONNIFY DATA PURCHASE SUCCESSFUL: {request_id}')
+                print(f'   Delivered Plan: {actual_plan_delivered}')
+                
             except Exception as monnify_error:
-                print(f'WARNING: Monnify failed: {str(monnify_error)}')
+                print(f'⚠️ MONNIFY FAILED: {str(monnify_error)}')
                 error_message = str(monnify_error)
                 
                 try:
                     # Fallback to Peyflex
+                    print(f'🔄 ATTEMPTING PEYFLEX DATA PURCHASE (FALLBACK):')
+                    print(f'   Network: {network}')
+                    print(f'   Plan ID: {data_plan_id}')
+                    print(f'   Phone: {phone_number}')
+                    
                     api_response = call_peyflex_data(network, data_plan_id, phone_number, request_id)
+                    
+                    # CRITICAL: Validate Peyflex response as well
+                    plan_match_result = validate_delivered_plan(api_response, data_plan_id, data_plan_name, amount)
+                    if not plan_match_result['matches']:
+                        print(f'❌ PLAN MISMATCH DETECTED IN PEYFLEX RESPONSE:')
+                        print(f'   Requested: {data_plan_name} (₦{amount})')
+                        print(f'   Delivered: {plan_match_result["delivered_plan"]}')
+                        
+                        # Log mismatch for investigation
+                        log_plan_mismatch(user_id, 'peyflex', {
+                            'requested_plan_id': data_plan_id,
+                            'requested_plan_name': data_plan_name,
+                            'requested_amount': amount,
+                            'delivered_plan': plan_match_result['delivered_plan'],
+                            'api_response': api_response,
+                            'transaction_id': str(transaction_id)
+                        })
+                        
+                        raise Exception(f'Plan mismatch: Requested {data_plan_name} but got {plan_match_result["delivered_plan"]}')
+                    
+                    actual_plan_delivered = plan_match_result['delivered_plan']
                     provider = 'peyflex'
                     success = True
-                    print(f'SUCCESS: Peyflex data purchase successful (fallback): {request_id}')
+                    print(f'✅ PEYFLEX DATA PURCHASE SUCCESSFUL (FALLBACK): {request_id}')
+                    print(f'   Delivered Plan: {actual_plan_delivered}')
+                    
                 except Exception as peyflex_error:
-                    print(f'ERROR: Peyflex failed: {str(peyflex_error)}')
+                    print(f'❌ PEYFLEX FAILED: {str(peyflex_error)}')
                     error_message = f'Both providers failed. Monnify: {monnify_error}, Peyflex: {peyflex_error}'
             
             if not success:
@@ -1937,3 +2029,285 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             }), 500
     
     return vas_purchase_bp
+
+# ==================== PLAN VALIDATION FUNCTIONS ====================
+
+def validate_data_plan_exists(network, plan_id, expected_amount):
+    """
+    Validate that a data plan exists in provider systems before purchase
+    Returns: {'valid': bool, 'error': str, 'plan_details': dict}
+    """
+    try:
+        print(f'🔍 VALIDATING PLAN: {network} - {plan_id} - ₦{expected_amount}')
+        
+        # Try to fetch current plans from both providers
+        monnify_plans = []
+        peyflex_plans = []
+        
+        # Check Monnify first
+        try:
+            access_token = get_monnify_access_token()
+            network_mapping = {
+                'MTN': 'MTN',
+                'AIRTEL': 'AIRTEL', 
+                'GLO': 'GLO',
+                '9MOBILE': '9MOBILE'
+            }
+            
+            monnify_network = network_mapping.get(network.upper())
+            if monnify_network:
+                # Get Monnify plans (simplified version of get_data_plans logic)
+                billers_response = call_monnify_bills_api(
+                    f'billers?category_code=DATA_BUNDLE&size=100',
+                    'GET',
+                    access_token=access_token
+                )
+                
+                target_biller = None
+                for biller in billers_response['responseBody']['content']:
+                    if biller['name'].upper() == monnify_network:
+                        target_biller = biller
+                        break
+                
+                if target_biller:
+                    products_response = call_monnify_bills_api(
+                        f'biller-products?biller_code={target_biller["code"]}&size=200',
+                        'GET',
+                        access_token=access_token
+                    )
+                    
+                    for product in products_response['responseBody']['content']:
+                        if product['code'] == plan_id:
+                            monnify_plans.append({
+                                'id': product['code'],
+                                'name': product['name'],
+                                'price': product.get('price', 0),
+                                'source': 'monnify'
+                            })
+                            break
+                            
+        except Exception as e:
+            print(f'⚠️ Monnify plan validation failed: {str(e)}')
+        
+        # Check Peyflex
+        try:
+            headers = {
+                'Authorization': f'Token {PEYFLEX_API_TOKEN}',
+                'Content-Type': 'application/json'
+            }
+            
+            # Map network for Peyflex
+            network_mapping = {
+                'MTN': 'mtn_gifting_data',
+                'AIRTEL': 'airtel_data',
+                'GLO': 'glo_data',
+                '9MOBILE': '9mobile_data'
+            }
+            
+            peyflex_network = network_mapping.get(network.upper(), network.lower())
+            url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={peyflex_network}'
+            
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                plans_list = data.get('plans', data.get('data', []))
+                
+                for plan in plans_list:
+                    if plan.get('plan_code') == plan_id:
+                        peyflex_plans.append({
+                            'id': plan.get('plan_code'),
+                            'name': plan.get('label', plan.get('name')),
+                            'price': float(plan.get('amount', plan.get('price', 0))),
+                            'source': 'peyflex'
+                        })
+                        break
+                        
+        except Exception as e:
+            print(f'⚠️ Peyflex plan validation failed: {str(e)}')
+        
+        # Validate plan exists in at least one provider
+        all_plans = monnify_plans + peyflex_plans
+        matching_plans = [p for p in all_plans if p['id'] == plan_id]
+        
+        if not matching_plans:
+            return {
+                'valid': False,
+                'error': f'Plan {plan_id} not found in any provider system',
+                'plan_details': None
+            }
+        
+        # Check if any matching plan has the expected amount
+        amount_matches = [p for p in matching_plans if abs(p['price'] - expected_amount) < 1.0]
+        
+        if not amount_matches:
+            print(f'⚠️ AMOUNT MISMATCH WARNING:')
+            for plan in matching_plans:
+                print(f'   Provider {plan["source"]}: ₦{plan["price"]} (expected ₦{expected_amount})')
+            
+            # Allow with warning - pricing might be dynamic
+            return {
+                'valid': True,
+                'error': None,
+                'plan_details': matching_plans[0],
+                'warning': f'Plan amount mismatch: expected ₦{expected_amount}, found ₦{matching_plans[0]["price"]}'
+            }
+        
+        return {
+            'valid': True,
+            'error': None,
+            'plan_details': amount_matches[0]
+        }
+        
+    except Exception as e:
+        print(f'❌ Plan validation error: {str(e)}')
+        return {
+            'valid': False,
+            'error': f'Validation failed: {str(e)}',
+            'plan_details': None
+        }
+
+def validate_delivered_plan(api_response, requested_plan_id, requested_plan_name, requested_amount):
+    """
+    Validate that the API response matches the requested plan
+    Returns: {'matches': bool, 'delivered_plan': str, 'details': dict}
+    """
+    try:
+        if not api_response:
+            return {
+                'matches': False,
+                'delivered_plan': 'No response',
+                'details': {}
+            }
+        
+        # Extract plan details from API response
+        delivered_plan_name = 'Unknown'
+        delivered_amount = 0
+        
+        # Handle Monnify response format
+        if isinstance(api_response, dict):
+            if 'description' in api_response:
+                delivered_plan_name = api_response['description']
+            if 'vendAmount' in api_response:
+                delivered_amount = float(api_response.get('vendAmount', 0))
+            elif 'payableAmount' in api_response:
+                delivered_amount = float(api_response.get('payableAmount', 0))
+        
+        # Handle Peyflex response format
+        if 'plan_name' in str(api_response):
+            # Extract from Peyflex response
+            pass
+        
+        # Simple validation - check if amounts are close (within ₦50)
+        amount_difference = abs(delivered_amount - requested_amount)
+        amounts_match = amount_difference <= 50.0
+        
+        # Check if plan names contain similar keywords
+        name_similarity = check_plan_name_similarity(requested_plan_name, delivered_plan_name)
+        
+        matches = amounts_match and name_similarity
+        
+        print(f'📊 PLAN VALIDATION RESULT:')
+        print(f'   Requested: {requested_plan_name} (₦{requested_amount})')
+        print(f'   Delivered: {delivered_plan_name} (₦{delivered_amount})')
+        print(f'   Amount Match: {amounts_match} (diff: ₦{amount_difference})')
+        print(f'   Name Similarity: {name_similarity}')
+        print(f'   Overall Match: {matches}')
+        
+        return {
+            'matches': matches,
+            'delivered_plan': f'{delivered_plan_name} (₦{delivered_amount})',
+            'details': {
+                'delivered_name': delivered_plan_name,
+                'delivered_amount': delivered_amount,
+                'amount_difference': amount_difference,
+                'name_similarity': name_similarity
+            }
+        }
+        
+    except Exception as e:
+        print(f'❌ Plan validation error: {str(e)}')
+        return {
+            'matches': False,
+            'delivered_plan': f'Validation error: {str(e)}',
+            'details': {}
+        }
+
+def check_plan_name_similarity(requested_name, delivered_name):
+    """
+    Check if plan names are similar enough to be considered a match
+    """
+    try:
+        requested_lower = requested_name.lower()
+        delivered_lower = delivered_name.lower()
+        
+        # Extract key terms
+        key_terms = ['1gb', '2gb', '500mb', '230mb', 'daily', 'weekly', 'monthly', '7 days', '30 days']
+        
+        requested_terms = [term for term in key_terms if term in requested_lower]
+        delivered_terms = [term for term in key_terms if term in delivered_lower]
+        
+        # Check for common terms
+        common_terms = set(requested_terms) & set(delivered_terms)
+        
+        # If they share key terms, consider similar
+        return len(common_terms) > 0
+        
+    except Exception:
+        return False
+
+def log_plan_mismatch(user_id, provider, mismatch_details):
+    """
+    Log plan mismatch incidents for investigation and recovery
+    """
+    try:
+        from datetime import datetime
+        from bson import ObjectId
+        
+        mismatch_log = {
+            '_id': ObjectId(),
+            'userId': ObjectId(user_id),
+            'provider': provider,
+            'incident_type': 'PLAN_MISMATCH',
+            'severity': 'HIGH',
+            'details': mismatch_details,
+            'status': 'LOGGED',
+            'requires_investigation': True,
+            'requires_refund': True,
+            'created_at': datetime.utcnow(),
+            'metadata': {
+                'user_impact': 'User received different plan than selected',
+                'financial_impact': mismatch_details.get('requested_amount', 0) - mismatch_details.get('delivered_amount', 0),
+                'recovery_needed': True
+            }
+        }
+        
+        # Store in MongoDB for investigation
+        mongo.db.plan_mismatch_logs.insert_one(mismatch_log)
+        
+        print(f'📝 PLAN MISMATCH LOGGED: {str(mismatch_log["_id"])}')
+        print(f'   User: {user_id}')
+        print(f'   Provider: {provider}')
+        print(f'   Impact: {mismatch_details}')
+        
+        # Create user notification about the issue
+        create_user_notification(
+            mongo=mongo.db,
+            user_id=user_id,
+            category='system',
+            title='⚠️ Data Plan Issue Detected',
+            body=f'We detected an issue with your recent data purchase. Our team is investigating and will resolve any discrepancies within 24 hours.',
+            related_id=mismatch_details.get('transaction_id'),
+            metadata={
+                'mismatch_log_id': str(mismatch_log['_id']),
+                'provider': provider,
+                'investigation_required': True,
+                'auto_refund_eligible': True
+            },
+            priority='high'
+        )
+        
+        return str(mismatch_log['_id'])
+        
+    except Exception as e:
+        print(f'❌ Failed to log plan mismatch: {str(e)}')
+        return None

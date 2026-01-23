@@ -543,7 +543,7 @@
                             <i class="fas fa-sync-alt"></i> Refresh Wallet Data
                         </button>
                         <button class="btn btn-success" onclick="showFundWalletModal()">
-                            <i class="fas fa-plus-circle"></i> Fund Wallet (Admin)
+                            <i class="fas fa-plus-circle"></i> Process Refund
                         </button>
                         <button class="btn btn-warning" onclick="showWalletHistoryModal()">
                             <i class="fas fa-history"></i> Transaction History
@@ -791,7 +791,65 @@
         
         // Show fund wallet modal (placeholder)
         async function showFundWalletModal() {
-            alert('Fund Wallet feature coming soon - this would integrate with admin funding capabilities');
+            if (!currentUser) {
+                showError('No user selected');
+                return;
+            }
+            
+            const amount = prompt('Enter refund amount (₦):');
+            if (!amount || isNaN(amount) || parseFloat(amount) <= 0) {
+                if (amount !== null) showError('Invalid amount');
+                return;
+            }
+            
+            const reason = prompt('Enter reason for refund (minimum 10 characters):');
+            if (!reason || reason.length < 10) {
+                if (reason !== null) showError('Reason must be at least 10 characters');
+                return;
+            }
+            
+            const referenceTransactionId = prompt('Enter reference transaction ID (optional):') || '';
+            
+            const confirmed = await showConfirmation({
+                title: 'Confirm Wallet Refund',
+                message: `Process refund of ₦${parseFloat(amount).toLocaleString()} to ${currentUser.displayName}?`,
+                details: {
+                    'User': currentUser.displayName,
+                    'Email': currentUser.email,
+                    'Refund Amount': `₦${parseFloat(amount).toLocaleString()}`,
+                    'Reason': reason,
+                    'Reference Transaction': referenceTransactionId || 'None'
+                }
+            });
+            
+            if (!confirmed) return;
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/admin/users/${currentUser.id}/wallet/refund`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${getAdminToken()}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        amount: parseFloat(amount),
+                        reason: reason,
+                        referenceTransactionId: referenceTransactionId
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showSuccess(`Refund processed successfully! ₦${data.data.amount.toLocaleString()} added to wallet.`);
+                    // Refresh wallet data
+                    await loadWalletDetails(currentUser.id);
+                } else {
+                    showError(data.message || 'Failed to process refund');
+                }
+            } catch (error) {
+                showError('Error processing refund: ' + error.message);
+            }
         }
         
         // Show wallet history modal
