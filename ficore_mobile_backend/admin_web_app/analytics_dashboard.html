@@ -651,15 +651,15 @@
                 <form id="change-password-form">
                     <div class="form-group">
                         <label for="current-password">Current Password</label>
-                        <input type="password" id="current-password" required>
+                        <input type="password" id="current-password" autocomplete="current-password" required>
                     </div>
                     <div class="form-group">
                         <label for="new-password">New Password</label>
-                        <input type="password" id="new-password" required minlength="8">
+                        <input type="password" id="new-password" autocomplete="new-password" required minlength="8">
                     </div>
                     <div class="form-group">
                         <label for="confirm-password">Confirm New Password</label>
-                        <input type="password" id="confirm-password" required minlength="8">
+                        <input type="password" id="confirm-password" autocomplete="new-password" required minlength="8">
                     </div>
                     <button type="submit" class="btn">Update Password</button>
                 </form>
@@ -838,6 +838,41 @@
             return `${days}d ago`;
         }
         
+        // Enhanced error handling wrapper
+        function safeExecute(fn, context = 'Unknown') {
+            try {
+                return fn();
+            } catch (error) {
+                console.error(`❌ Error in ${context}:`, error);
+                return null;
+            }
+        }
+        
+        // Safe DOM element access
+        function safeGetElement(id) {
+            const element = document.getElementById(id);
+            if (!element) {
+                console.warn(`⚠️ Element with id '${id}' not found`);
+            }
+            return element;
+        }
+        
+        // Safe text content update
+        function safeUpdateText(id, text) {
+            const element = safeGetElement(id);
+            if (element) {
+                element.textContent = text;
+            }
+        }
+        
+        // Safe HTML update
+        function safeUpdateHTML(id, html) {
+            const element = safeGetElement(id);
+            if (element) {
+                element.innerHTML = html;
+            }
+        }
+        
         // Load dashboard data
         async function loadDashboard() {
             console.log('🚀 Starting dashboard load...');
@@ -871,15 +906,15 @@
                     
                     console.log('✅ Overview loaded successfully');
                     
-                    // Update metrics
-                    document.getElementById('total-users').textContent = overview.data.users.total.toLocaleString();
-                    document.getElementById('dau').textContent = overview.data.users.dailyActive.toLocaleString();
-                    document.getElementById('wau').textContent = overview.data.users.weeklyActive.toLocaleString();
-                    document.getElementById('mau').textContent = overview.data.users.monthlyActive.toLocaleString();
-                    document.getElementById('total-income').textContent = overview.data.entries.totalIncome.toLocaleString();
-                    document.getElementById('total-expense').textContent = overview.data.entries.totalExpense.toLocaleString();
-                    document.getElementById('income-month').textContent = overview.data.entries.incomeThisMonth.toLocaleString();
-                    document.getElementById('expense-month').textContent = overview.data.entries.expenseThisMonth.toLocaleString();
+                    // Update metrics using safe functions
+                    safeUpdateText('total-users', overview.data.users.total.toLocaleString());
+                    safeUpdateText('dau', overview.data.users.dailyActive.toLocaleString());
+                    safeUpdateText('wau', overview.data.users.weeklyActive.toLocaleString());
+                    safeUpdateText('mau', overview.data.users.monthlyActive.toLocaleString());
+                    safeUpdateText('total-income', overview.data.entries.totalIncome.toLocaleString());
+                    safeUpdateText('total-expense', overview.data.entries.totalExpense.toLocaleString());
+                    safeUpdateText('income-month', overview.data.entries.incomeThisMonth.toLocaleString());
+                    safeUpdateText('expense-month', overview.data.entries.expenseThisMonth.toLocaleString());
                     
                     // Update recent activity
                     const activityList = document.getElementById('recent-activity');
@@ -1647,9 +1682,22 @@
             }
         }
         
-        // Initial load - NO AUTO-REFRESH
-        loadDashboard();
-        loadRateLimitData();
+        // Initial load - Wait for DOM to be ready
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('🚀 DOM loaded, initializing analytics dashboard...');
+            loadDashboard();
+            loadRateLimitData();
+        });
+        
+        // Fallback for already loaded DOM
+        if (document.readyState === 'loading') {
+            // DOM is still loading, event listener will handle it
+        } else {
+            // DOM is already loaded
+            console.log('🚀 DOM already loaded, initializing analytics dashboard...');
+            loadDashboard();
+            loadRateLimitData();
+        }
     </script>
 </body>
 </html>
