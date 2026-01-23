@@ -90,11 +90,29 @@ if not app.debug:
 # Add request logging middleware
 @app.before_request
 def log_request_info():
-    app.logger.info(f'Request: {request.method} {request.url} - Headers: {dict(request.headers)} - Body: {request.get_data(as_text=True)[:500]}')
+    try:
+        # Only log request body for non-file uploads to avoid logging large files
+        body_preview = ""
+        if request.content_type and 'multipart/form-data' not in request.content_type:
+            body_data = request.get_data(as_text=True)
+            body_preview = body_data[:500] if body_data else ""
+        
+        app.logger.info(f'Request: {request.method} {request.url} - Headers: {dict(request.headers)} - Body: {body_preview}')
+    except Exception as e:
+        app.logger.info(f'Request: {request.method} {request.url} - (Error reading request: {str(e)})')
 
 @app.after_request
 def log_response_info(response):
-    app.logger.info(f'Response: {response.status_code} - {response.get_data(as_text=True)[:500]}')
+    try:
+        # Only try to read response data for JSON responses, not file downloads
+        if response.content_type and 'application/json' in response.content_type:
+            app.logger.info(f'Response: {response.status_code} - {response.get_data(as_text=True)[:500]}')
+        else:
+            # For file responses, just log the status and content type
+            app.logger.info(f'Response: {response.status_code} - Content-Type: {response.content_type}')
+    except Exception as e:
+        # Fallback logging if response data can't be read
+        app.logger.info(f'Response: {response.status_code} - (Content not readable: {str(e)})')
     return response
 
 # Configuration
