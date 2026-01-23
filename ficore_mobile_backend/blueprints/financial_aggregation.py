@@ -87,7 +87,7 @@ def init_financial_aggregation_blueprint(mongo, token_required, serialize_doc):
             start_time = datetime.utcnow()
             
             # Use allowDiskUse=False to force index usage and prevent disk spills
-            income_result = list(self.db.incomes.aggregate(
+            income_result = list(self.db.income.aggregate(
                 income_pipeline, 
                 allowDiskUse=False,
                 maxTimeMS=5000  # 5 second timeout for performance
@@ -219,7 +219,7 @@ def init_financial_aggregation_blueprint(mongo, token_required, serialize_doc):
             start_time = datetime.utcnow()
             
             # Use enhanced aggregation options for better performance
-            income_counts = list(self.db.incomes.aggregate(
+            income_counts = list(self.db.income.aggregate(
                 income_pipeline, 
                 allowDiskUse=False,
                 maxTimeMS=10000,  # 10 second timeout for YTD queries
@@ -410,7 +410,7 @@ def init_financial_aggregation_blueprint(mongo, token_required, serialize_doc):
             ]
             
             # Execute aggregations
-            income_counts = list(self.db.incomes.aggregate(income_pipeline))
+            income_counts = list(self.db.income.aggregate(income_pipeline))
             expense_counts = list(self.db.expenses.aggregate(expense_pipeline))
             
             # Format results
@@ -492,7 +492,7 @@ def init_financial_aggregation_blueprint(mongo, token_required, serialize_doc):
                 # Custom aggregation for historical month
                 user_id = current_user['_id']
                 
-                income_result = list(mongo.db.incomes.aggregate([
+                income_result = list(mongo.db.income.aggregate([
                     {
                         '$match': {
                             'userId': user_id,
@@ -730,7 +730,7 @@ def init_financial_aggregation_blueprint(mongo, token_required, serialize_doc):
                     }
                 ]
                 
-                income_counts = list(mongo.db.incomes.aggregate(income_pipeline))
+                income_counts = list(mongo.db.income.aggregate(income_pipeline))
                 expense_counts = list(mongo.db.expenses.aggregate(expense_pipeline))
                 
                 # Format results

@@ -933,6 +933,64 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
         result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
         return jsonify(result), status_code
     
+    def _get_reserved_accounts_with_banks_logic(current_user):
+        """Business logic for getting user's reserved accounts with available banks"""
+        try:
+            user_id = str(current_user['_id'])
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            
+            if not wallet:
+                return {
+                    'success': False,
+                    'message': 'Reserved account not found. Please create a wallet first.'
+                }, 404
+            
+            # Get all available accounts
+            accounts = wallet.get('accounts', [])
+            
+            if not accounts:
+                return {
+                    'success': False,
+                    'message': 'No accounts found in wallet'
+                }, 404
+            
+            # Return all accounts for frontend to choose from
+            return {
+                'success': True,
+                'data': {
+                    'accounts': accounts,  # All available bank accounts
+                    'accountReference': wallet.get('accountReference', ''),
+                    'status': wallet.get('status', 'active'),
+                    'tier': wallet.get('tier', 'TIER_1'),
+                    'kycVerified': wallet.get('kycVerified', False),
+                    'createdAt': wallet.get('createdAt', datetime.utcnow()).isoformat() + 'Z',
+                    # Keep backward compatibility - return first account as default
+                    'defaultAccount': {
+                        'accountNumber': accounts[0].get('accountNumber', ''),
+                        'accountName': accounts[0].get('accountName', ''),
+                        'bankName': accounts[0].get('bankName', 'Wema Bank'),
+                        'bankCode': accounts[0].get('bankCode', '035'),
+                    }
+                },
+                'message': f'Reserved account retrieved successfully with {len(accounts)} available banks'
+            }, 200
+            
+        except Exception as e:
+            print(f'ERROR: Error getting reserved accounts: {str(e)}')
+            return {
+                'success': False,
+                'message': 'Failed to retrieve reserved accounts',
+                'errors': {'general': [str(e)]}
+            }, 500
+
+    @vas_wallet_bp.route('/reserved-accounts', methods=['GET'])
+    @token_required
+    def get_reserved_accounts(current_user):
+        """Get user's reserved accounts (alias for backward compatibility)"""
+        # Call the business logic function
+        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
+        return jsonify(result), status_code
+    
     @vas_wallet_bp.route('/reserved-accounts/with-banks', methods=['GET'])
     @token_required
     def get_reserved_accounts_with_banks(current_user):
@@ -1291,6 +1349,143 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
+    @vas_wallet_bp.route('/transactions/all', methods=['GET'])
+    @token_required
+    def get_all_user_transactions(current_user):
+        """Get all user transactions (VAS + Income + Expenses) in unified chronological order"""
+        try:
+            user_id = str(current_user['_id'])
+            limit = int(request.args.get('limit', 50))
+            skip = int(request.args.get('skip', 0))
+            
+            print(f"Loading all transactions for user {user_id} (limit={limit}, skip={skip})")
+            
+            all_transactions = []
+            
+            # Get VAS transactions
+            vas_transactions = list(
+                mongo.db.vas_transactions.find({'userId': ObjectId(user_id)})
+                .sort('createdAt', -1)
+            )
+            
+            for txn in vas_transactions:
+                created_at = txn.get('createdAt', datetime.utcnow())
+                if not isinstance(created_at, datetime):
+                    created_at = datetime.utcnow()
+                
+                txn_type = txn.get('type', 'UNKNOWN')
+                description = f"{txn_type.replace('_', ' ').title()}"
+                
+                if txn_type == 'WALLET_FUNDING':
+                    description = f"Wallet Funding - ₦ {txn.get('amount', 0):,.2f}"
+                elif txn_type == 'AIRTIME':
+                    phone = txn.get('phoneNumber', 'Unknown')
+                    description = f"Airtime - {phone} - ₦ {txn.get('amount', 0):,.2f}"
+                elif txn_type == 'DATA':
+                    phone = txn.get('phoneNumber', 'Unknown')
+                    plan = txn.get('planName', 'Data Plan')
+                    description = f"Data - {phone} - {plan}"
+                elif txn_type == 'BILL':
+                    description = f"Bill Payment - ₦ {txn.get('amount', 0):,.2f}"
+                
+                all_transactions.append({
+                    '_id': str(txn['_id']),
+                    'type': 'VAS',
+                    'subtype': txn_type,
+                    'amount': txn.get('amount', 0),
+                    'amountPaid': txn.get('amountPaid', 0),
+                    'fee': txn.get('depositFee', 0),
+                    'description': description,
+                    'reference': txn.get('reference', ''),
+                    'status': txn.get('status', 'UNKNOWN'),
+                    'provider': txn.get('provider', ''),
+                    'createdAt': created_at.isoformat() + 'Z',
+                    'date': created_at.isoformat() + 'Z',
+                    'category': 'VAS',
+                    'metadata': {
+                        'phoneNumber': txn.get('phoneNumber', ''),
+                        'planName': txn.get('planName', ''),
+                    }
+                })
+            
+            # Get Income transactions
+            income_transactions = list(
+                mongo.db.income.find({'userId': ObjectId(user_id)})
+                .sort('dateReceived', -1)
+            )
+            
+            for txn in income_transactions:
+                date_received = txn.get('dateReceived', datetime.utcnow())
+                if not isinstance(date_received, datetime):
+                    date_received = datetime.utcnow()
+                
+                all_transactions.append({
+                    '_id': str(txn['_id']),
+                    'type': 'INCOME',
+                    'subtype': 'INCOME',
+                    'amount': txn.get('amount', 0),
+                    'description': txn.get('description', 'Income received'),
+                    'title': txn.get('source', 'Income'),
+                    'source': txn.get('source', 'Unknown'),
+                    'reference': '',
+                    'status': 'SUCCESS',
+                    'createdAt': date_received.isoformat() + 'Z',
+                    'date': date_received.isoformat() + 'Z',
+                    'category': txn.get('category', 'Income')
+                })
+            
+            # Get Expense transactions
+            expense_transactions = list(
+                mongo.db.expenses.find({'userId': ObjectId(user_id)})
+                .sort('date', -1)
+            )
+            
+            for txn in expense_transactions:
+                expense_date = txn.get('date', datetime.utcnow())
+                if not isinstance(expense_date, datetime):
+                    expense_date = datetime.utcnow()
+                
+                all_transactions.append({
+                    '_id': str(txn['_id']),
+                    'type': 'EXPENSE',
+                    'subtype': 'EXPENSE',
+                    'amount': -txn.get('amount', 0),  # Negative for expenses
+                    'description': txn.get('description', 'Expense recorded'),
+                    'title': txn.get('title', 'Expense'),
+                    'reference': '',
+                    'status': 'SUCCESS',
+                    'createdAt': expense_date.isoformat() + 'Z',
+                    'date': expense_date.isoformat() + 'Z',
+                    'category': txn.get('category', 'Expense')
+                })
+            
+            # Sort all transactions by date (newest first)
+            all_transactions.sort(key=lambda x: x['createdAt'], reverse=True)
+            
+            # Apply pagination
+            paginated_transactions = all_transactions[skip:skip + limit]
+            
+            print(f"Loaded {len(paginated_transactions)} transactions (total: {len(all_transactions)})")
+            
+            return jsonify({
+                'success': True,
+                'data': paginated_transactions,
+                'total': len(all_transactions),
+                'limit': limit,
+                'skip': skip,
+                'message': 'All transactions loaded successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f"ERROR: /vas/wallet/transactions/all failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                'success': False,
+                'message': 'Failed to load transactions',
+                'error': str(e)
+            }), 500
+
     # ==================== WEBHOOK ENDPOINT ====================
     
     @vas_wallet_bp.route('/webhook', methods=['POST'])
