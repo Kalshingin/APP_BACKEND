@@ -1548,7 +1548,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             expense_entry = {
                 '_id': ObjectId(),
                 'userId': ObjectId(user_id),
-                'amount': selling_price,  # Record selling price as expense
+                'amount': amount,  # Record actual purchase amount (₦800, not ₦839) - fees eliminated
                 'category': 'Utilities',
                 'description': retention_description,  # Use retention-enhanced description
                 'date': datetime.utcnow(),
@@ -1556,7 +1556,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'vasTransactionId': transaction_id,
                 'metadata': {
                     'faceValue': amount,
-                    'actualCost': selling_price,
+                    'actualCost': amount,  # Actual cost is now the purchase amount (fees eliminated)
                     'userTier': user_tier,
                     'savingsMessage': savings_message,
                     'originalPrice': pricing_result.get('cost_price', 0) + pricing_result.get('margin', 0),
@@ -1564,7 +1564,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     'pricingStrategy': pricing_result.get('strategy_used', 'standard'),
                     'freeFeesApplied': pricing_result.get('free_fee_applied', False),
                     'baseDescription': base_description,  # Store original for reference
-                    'retentionEnhanced': True  # Flag to indicate retention messaging applied
+                    'retentionEnhanced': True,  # Flag to indicate retention messaging applied
+                    'feesEliminated': True,  # Flag to indicate VAS purchase fees have been eliminated
+                    'sellingPriceForReference': selling_price  # Keep for reference but don't use for expense amount
                 },
                 'createdAt': datetime.utcnow(),
                 'updatedAt': datetime.utcnow()
@@ -1852,7 +1854,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             expense_entry = {
                 '_id': ObjectId(),
                 'userId': ObjectId(user_id),
-                'amount': selling_price,  # Record selling price as expense
+                'amount': amount,  # Record actual purchase amount (₦800, not ₦839) - fees eliminated
                 'category': 'Utilities',
                 'description': retention_description,  # Use retention-focused description
                 'date': datetime.utcnow(),
@@ -1861,11 +1863,13 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'metadata': {
                     'planName': data_plan_name,
                     'originalAmount': amount,
-                    'actualCost': selling_price,
+                    'actualCost': amount,  # Actual cost is now the purchase amount (fees eliminated)
                     'userTier': user_tier,
                     'savingsMessage': savings_message,
                     'discountApplied': discount_applied,  # Track discount for analytics
-                    'retentionMessaging': True  # Flag for retention analytics
+                    'retentionMessaging': True,  # Flag for retention analytics
+                    'feesEliminated': True,  # Flag to indicate VAS purchase fees have been eliminated
+                    'sellingPriceForReference': selling_price  # Keep for reference but don't use for expense amount
                 },
                 'createdAt': datetime.utcnow(),
                 'updatedAt': datetime.utcnow()

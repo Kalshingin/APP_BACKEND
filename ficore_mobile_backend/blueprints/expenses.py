@@ -54,7 +54,9 @@ def get_expenses():
             expense_list = []
             for expense in expenses:
                 expense_data = expenses_bp.serialize_doc(expense.copy())
-                expense_data['title'] = expense_data.get('description', expense_data.get('title', 'Expense'))
+                # Keep auto-generated title, don't override with description
+                if not expense_data.get('title'):
+                    expense_data['title'] = expense_data.get('description', 'Expense')
                 expense_data['date'] = expense_data.get('date', datetime.utcnow()).isoformat() + 'Z'
                 expense_data['createdAt'] = expense_data.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
                 expense_data['updatedAt'] = expense_data.get('updatedAt', datetime.utcnow()).isoformat() + 'Z' if expense_data.get('updatedAt') else None
@@ -240,7 +242,9 @@ def create_expense():
            
             created_expense = expenses_bp.serialize_doc(expense_data.copy())
             created_expense['id'] = expense_id
-            created_expense['title'] = created_expense.get('description', 'Expense')
+            # Keep auto-generated title, don't override with description
+            if not created_expense.get('title'):
+                created_expense['title'] = created_expense.get('description', 'Expense')
             created_expense['date'] = created_expense.get('date', datetime.utcnow()).isoformat() + 'Z'
             created_expense['createdAt'] = created_expense.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
             created_expense['updatedAt'] = created_expense.get('updatedAt', datetime.utcnow()).isoformat() + 'Z'
@@ -315,7 +319,9 @@ def update_expense(expense_id):
                         update_data[field] = data[field]
             
             # Also update title field for consistency
-            if 'description' in update_data:
+            # Don't automatically override title with description on updates
+            # Only set title if it's explicitly provided or missing
+            if 'description' in update_data and not update_data.get('title'):
                 update_data['title'] = update_data['description']
             
             # Use the immutable ledger helper
@@ -454,7 +460,9 @@ def get_expense_summary():
             recent_expenses_data = []
             for expense in recent_expenses:
                 e = expenses_bp.serialize_doc(expense.copy())
-                e['title'] = e.get('description', e.get('title', 'Expense'))
+                # Keep auto-generated title, don't override with description
+                if not e.get('title'):
+                    e['title'] = e.get('description', 'Expense')
                 e['date'] = e.get('date', datetime.utcnow()).isoformat() + 'Z'
                 e['createdAt'] = e.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
                 e['updatedAt'] = e.get('updatedAt', datetime.utcnow()).isoformat() + 'Z'

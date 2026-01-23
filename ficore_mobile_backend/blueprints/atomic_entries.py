@@ -295,7 +295,9 @@ def init_atomic_entries_blueprint(mongo, token_required, serialize_doc):
             # STEP 9: Prepare response
             created_expense = atomic_entries_bp.serialize_doc(expense_data.copy())
             created_expense['id'] = expense_id
-            created_expense['title'] = created_expense.get('description', 'Expense')
+            # Keep auto-generated title, don't override with description
+            if not created_expense.get('title'):
+                created_expense['title'] = created_expense.get('description', 'Expense')
             created_expense['date'] = created_expense.get('date', datetime.utcnow()).isoformat() + 'Z'
             created_expense['createdAt'] = created_expense.get('createdAt', datetime.utcnow()).isoformat() + 'Z'
             created_expense['updatedAt'] = created_expense.get('updatedAt', datetime.utcnow()).isoformat() + 'Z'
