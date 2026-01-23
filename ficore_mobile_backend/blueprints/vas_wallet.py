@@ -983,21 +983,6 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }, 500
 
-    @vas_wallet_bp.route('/reserved-accounts', methods=['GET'])
-    @token_required
-    def get_reserved_accounts(current_user):
-        """Get user's reserved accounts (alias for backward compatibility)"""
-        # Call the business logic function
-        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
-        return jsonify(result), status_code
-    
-    @vas_wallet_bp.route('/reserved-accounts/with-banks', methods=['GET'])
-    @token_required
-    def get_reserved_accounts_with_banks(current_user):
-        """Get user's reserved accounts with available banks"""
-        # Call the business logic function
-        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
-        return jsonify(result), status_code
     @vas_wallet_bp.route('/reserved-account', methods=['GET'])
     @token_required
     def get_reserved_account(current_user):
