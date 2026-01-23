@@ -7,7 +7,7 @@ Providers: Monnify (primary wallet provider)
 Features: Reserved accounts, KYC verification, multi-bank support, webhook processing
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 from datetime import datetime, timedelta
 from bson import ObjectId
 import os
@@ -18,6 +18,8 @@ import uuid
 import json
 import pymongo
 import time
+import queue
+import threading
 from utils.email_service import get_email_service
 from blueprints.notifications import create_user_notification
 
@@ -34,6 +36,27 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
     ACTIVATION_FEE = 100.0
     BVN_VERIFICATION_COST = 10.0
     NIN_VERIFICATION_COST = 60.0
+    
+    # 🚀 INSTANT BALANCE UPDATE INFRASTRUCTURE
+    # Global queue for real-time balance updates
+    balance_update_queues = {}  # user_id -> queue
+    balance_update_lock = threading.Lock()
+    
+    def get_user_balance_queue(user_id):
+        """Get or create balance update queue for user"""
+        with balance_update_lock:
+            if user_id not in balance_update_queues:
+                balance_update_queues[user_id] = queue.Queue()
+            return balance_update_queues[user_id]
+    
+    def push_balance_update(user_id, update_data):
+        """Push balance update to user's SSE stream"""
+        try:
+            user_queue = get_user_balance_queue(user_id)
+            user_queue.put(update_data)
+            print(f'🚀 SSE: Balance update pushed for user {user_id}: ₦{update_data.get("new_balance", 0):,.2f}')
+        except Exception as e:
+            print(f'WARNING: Failed to push balance update: {str(e)}')
     
     # ==================== HELPER FUNCTIONS ====================
     
@@ -272,6 +295,66 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
             return jsonify({
                 'success': False,
                 'message': 'Failed to retrieve wallet balance',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    # 🚀 REAL-TIME BALANCE UPDATES VIA SERVER-SENT EVENTS
+    @vas_wallet_bp.route('/balance/stream', methods=['GET'])
+    @token_required
+    def stream_balance_updates(current_user):
+        """Server-Sent Events stream for real-time balance updates"""
+        try:
+            user_id = str(current_user['_id'])
+            user_queue = get_user_balance_queue(user_id)
+            
+            def event_stream():
+                """Generate SSE events for balance updates"""
+                try:
+                    # Send initial connection confirmation
+                    yield f"data: {json.dumps({'type': 'connected', 'user_id': user_id, 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                    
+                    while True:
+                        try:
+                            # Wait for balance update events (30 second timeout)
+                            update = user_queue.get(timeout=30)
+                            yield f"data: {json.dumps(update)}\n\n"
+                            
+                        except queue.Empty:
+                            # Send heartbeat every 30 seconds to keep connection alive
+                            heartbeat = {
+                                'type': 'heartbeat',
+                                'timestamp': datetime.utcnow().isoformat()
+                            }
+                            yield f"data: {json.dumps(heartbeat)}\n\n"
+                            
+                except GeneratorExit:
+                    print(f'INFO: SSE connection closed for user {user_id}')
+                except Exception as e:
+                    print(f'ERROR: SSE stream error for user {user_id}: {str(e)}')
+                    error_event = {
+                        'type': 'error',
+                        'message': 'Stream error occurred',
+                        'timestamp': datetime.utcnow().isoformat()
+                    }
+                    yield f"data: {json.dumps(error_event)}\n\n"
+            
+            print(f'INFO: SSE stream started for user {user_id}')
+            return Response(
+                event_stream(),
+                mimetype='text/plain',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Headers': 'Cache-Control'
+                }
+            )
+            
+        except Exception as e:
+            print(f'ERROR: Failed to start SSE stream: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to start balance stream',
                 'errors': {'general': [str(e)]}
             }), 500
     
@@ -1555,6 +1638,22 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                     {'userId': ObjectId(user_id)},
                     {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
                 )
+                
+                # INSTANT BALANCE UPDATE VIA SSE - PUSH TO FRONTEND IMMEDIATELY
+                balance_update = {
+                    'type': 'balance_update',
+                    'user_id': user_id,
+                    'new_balance': new_balance,
+                    'previous_balance': wallet.get('balance', 0.0),
+                    'amount_credited': amount_to_credit,
+                    'amount_paid': amount_paid,
+                    'deposit_fee': deposit_fee,
+                    'transaction_reference': transaction_reference,
+                    'transaction_type': 'WALLET_FUNDING',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'is_premium': is_premium
+                }
+                push_balance_update(user_id, balance_update)
                 
                 # Record corporate revenue (₦ 30 fee)
                 if deposit_fee > 0:
