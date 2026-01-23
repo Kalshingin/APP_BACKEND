@@ -54,6 +54,46 @@ from config.credentials import credential_manager
 
 app = Flask(__name__)
 
+# Enhanced logging configuration
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Configure logging
+if not app.debug:
+    # Create logs directory if it doesn't exist
+    import os
+    if not os.path.exists('logs'):
+        os.mkdir('logs')
+    
+    # Set up file handler with rotation
+    file_handler = RotatingFileHandler('logs/ficore_backend.log', maxBytes=10240000, backupCount=10)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    file_handler.setLevel(logging.INFO)
+    app.logger.addHandler(file_handler)
+    
+    # Set up console handler for immediate feedback
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s'
+    ))
+    console_handler.setLevel(logging.INFO)
+    app.logger.addHandler(console_handler)
+    
+    app.logger.setLevel(logging.INFO)
+    app.logger.info('FiCore Backend startup')
+
+# Add request logging middleware
+@app.before_request
+def log_request_info():
+    app.logger.info(f'Request: {request.method} {request.url} - Headers: {dict(request.headers)} - Body: {request.get_data(as_text=True)[:500]}')
+
+@app.after_request
+def log_response_info(response):
+    app.logger.info(f'Response: {response.status_code} - {response.get_data(as_text=True)[:500]}')
+    return response
+
 # Configuration
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'ficore-mobile-secret-key-2025')
 app.config['MONGO_URI'] = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/ficore_mobile')
@@ -1020,3 +1060,8 @@ if __name__ == '__main__':
         # Don't fail app startup if scheduler fails
     
     app.run(debug=True, host='0.0.0.0', port=5000)
+
+
+
+
+
