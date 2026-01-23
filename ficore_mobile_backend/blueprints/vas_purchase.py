@@ -2046,6 +2046,7 @@ def validate_data_plan_exists(network, plan_id, expected_amount):
         
         # Check Monnify first
         try:
+            from utils.monnify_utils import get_monnify_access_token, call_monnify_bills_api
             access_token = get_monnify_access_token()
             network_mapping = {
                 'MTN': 'MTN',
@@ -2091,6 +2092,9 @@ def validate_data_plan_exists(network, plan_id, expected_amount):
         
         # Check Peyflex
         try:
+            from config.environment import PEYFLEX_API_TOKEN, PEYFLEX_BASE_URL
+            import requests
+            
             headers = {
                 'Authorization': f'Token {PEYFLEX_API_TOKEN}',
                 'Content-Type': 'application/json'
@@ -2262,6 +2266,7 @@ def log_plan_mismatch(user_id, provider, mismatch_details):
     try:
         from datetime import datetime
         from bson import ObjectId
+        from utils.notification_utils import create_user_notification
         
         mismatch_log = {
             '_id': ObjectId(),
