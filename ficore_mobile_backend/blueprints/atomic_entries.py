@@ -510,6 +510,10 @@ def init_atomic_entries_blueprint(mongo, token_required, serialize_doc):
                 'fcChargeAttemptedAt': None
             }
             
+            # Import and apply auto-population for proper source/description
+            from ..utils.income_utils import auto_populate_income_fields
+            income_data = auto_populate_income_fields(income_data)
+            
             # STEP 6: Insert income into database
             result = atomic_entries_bp.mongo.db.incomes.insert_one(income_data)
             income_id = str(result.inserted_id)

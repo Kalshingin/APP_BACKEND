@@ -184,6 +184,9 @@ def init_income_blueprint(mongo, token_required, serialize_doc):
             # NOTE: If within free limit, no FC deduction needed
             # If over limit, FC will be deducted after successful creation
             
+            # Import auto-population utility
+            from ..utils.income_utils import auto_populate_income_fields
+            
             # Simplified: No recurring logic - all incomes are one-time entries
             
             # CRITICAL FIX: Ensure amount is stored exactly as provided, no multipliers
@@ -207,6 +210,9 @@ def init_income_blueprint(mongo, token_required, serialize_doc):
                 'createdAt': datetime.utcnow(),
                 'updatedAt': datetime.utcnow()
             }
+            
+            # Auto-populate title and description if missing
+            income_data = auto_populate_income_fields(income_data)
             
             # DEBUG: Log the exact amount being stored
             print(f"DEBUG: Creating income record with amount: {raw_amount} for user: {current_user['_id']}")
