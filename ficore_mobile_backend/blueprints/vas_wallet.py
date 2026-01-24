@@ -23,6 +23,27 @@ import threading
 from utils.email_service import get_email_service
 from blueprints.notifications import create_user_notification
 
+# 🚀 INSTANT BALANCE UPDATE INFRASTRUCTURE - GLOBAL
+# Global queue for real-time balance updates
+balance_update_queues = {}  # user_id -> queue
+balance_update_lock = threading.Lock()
+
+def get_user_balance_queue(user_id):
+    """Get or create balance update queue for user"""
+    with balance_update_lock:
+        if user_id not in balance_update_queues:
+            balance_update_queues[user_id] = queue.Queue()
+        return balance_update_queues[user_id]
+
+def push_balance_update(user_id, update_data):
+    """Push balance update to user's SSE stream - GLOBAL FUNCTION"""
+    try:
+        user_queue = get_user_balance_queue(user_id)
+        user_queue.put(update_data)
+        print(f'🚀 SSE: Balance update pushed for user {user_id}: ₦{update_data.get("new_balance", 0):,.2f}')
+    except Exception as e:
+        print(f'WARNING: Failed to push balance update: {str(e)}')
+
 def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
     vas_wallet_bp = Blueprint('vas_wallet', __name__, url_prefix='/api/vas/wallet')
     
@@ -36,27 +57,6 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
     ACTIVATION_FEE = 100.0
     BVN_VERIFICATION_COST = 10.0
     NIN_VERIFICATION_COST = 60.0
-    
-    # 🚀 INSTANT BALANCE UPDATE INFRASTRUCTURE
-    # Global queue for real-time balance updates
-    balance_update_queues = {}  # user_id -> queue
-    balance_update_lock = threading.Lock()
-    
-    def get_user_balance_queue(user_id):
-        """Get or create balance update queue for user"""
-        with balance_update_lock:
-            if user_id not in balance_update_queues:
-                balance_update_queues[user_id] = queue.Queue()
-            return balance_update_queues[user_id]
-    
-    def push_balance_update(user_id, update_data):
-        """Push balance update to user's SSE stream"""
-        try:
-            user_queue = get_user_balance_queue(user_id)
-            user_queue.put(update_data)
-            print(f'🚀 SSE: Balance update pushed for user {user_id}: ₦{update_data.get("new_balance", 0):,.2f}')
-        except Exception as e:
-            print(f'WARNING: Failed to push balance update: {str(e)}')
     
     # ==================== HELPER FUNCTIONS ====================
     
