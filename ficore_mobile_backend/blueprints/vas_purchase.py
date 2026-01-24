@@ -82,10 +82,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         except Exception as e:
             print(f'WARNING: Error generating retention description: {str(e)}')
             return base_description  # Fallback to base description
-                return base_description
-        except Exception as e:
-            print(f'WARNING: Error generating retention description: {str(e)}')
-            return base_description  # Fallback to base description
+                
     
     def generate_request_id(user_id, transaction_type):
         """Generate unique request ID for idempotency"""
@@ -2490,4 +2487,5 @@ def log_plan_mismatch(user_id, provider, mismatch_details):
     except Exception as e:
         print(f'❌ Failed to log plan mismatch: {str(e)}')
         return None
+
 
