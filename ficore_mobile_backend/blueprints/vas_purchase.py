@@ -19,6 +19,7 @@ from utils.dynamic_pricing_engine import get_pricing_engine, calculate_vas_price
 from utils.emergency_pricing_recovery import tag_emergency_transaction
 from blueprints.notifications import create_user_notification
 from blueprints.vas_wallet import push_balance_update
+from utils.monnify_utils import get_monnify_access_token, call_monnify_bills_api
 
 def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     vas_purchase_bp = Blueprint('vas_purchase', __name__, url_prefix='/api/vas/purchase')
@@ -37,6 +38,26 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     
     VAS_TRANSACTION_FEE = 30.0
     
+    # Centralized mapping to decouple internal names from provider names
+    PROVIDER_NETWORK_MAP = {
+        'mtn': {
+            'monnify': 'MTN',
+            'peyflex': 'mtn_sme_data'  # or mtn_sme_data based on your UI
+        },
+        'airtel': {
+            'monnify': 'AIRTEL',
+            'peyflex': 'airtel_data'
+        },
+        'glo': {
+            'monnify': 'GLO',
+            'peyflex': 'glo_data'
+        },
+        '9mobile': {
+            'monnify': '9MOBILE',
+            'peyflex': '9mobile_data'
+        }
+    }
+    
     # ==================== HELPER FUNCTIONS ====================
     
     def normalize_monnify_network(network):
@@ -46,77 +67,16 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             return network_lower.split('_')[0].upper()  # e.g., 'airtel_data' -> 'AIRTEL'
         return network.upper()
     
-    def get_monnify_access_token():
-        """Get Monnify access token for Bills API"""
-        try:
-            import base64
-            
-            # Create basic auth header
-            credentials = f"{MONNIFY_API_KEY}:{MONNIFY_SECRET_KEY}"
-            encoded_credentials = base64.b64encode(credentials.encode()).decode()
-            
-            headers = {
-                'Authorization': f'Basic {encoded_credentials}',
-                'Content-Type': 'application/json'
-            }
-            
-            url = f"{MONNIFY_BASE_URL}/api/v1/auth/login"
-            
-            response = requests.post(url, headers=headers, timeout=8)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('requestSuccessful'):
-                    access_token = data['responseBody']['accessToken']
-                    print(f'Monnify access token obtained: {access_token[:20]}...')
-                    return access_token
-                else:
-                    raise Exception(f"Monnify auth failed: {data.get('responseMessage', 'Unknown error')}")
-            else:
-                raise Exception(f"Monnify auth HTTP error: {response.status_code} - {response.text}")
-                
-        except Exception as e:
-            print(f'ERROR: Failed to get Monnify access token: {str(e)}')
-            raise Exception(f'Monnify authentication failed: {str(e)}')
-    
-    def call_monnify_bills_api(endpoint, method='GET', data=None, access_token=None):
-        """Generic Monnify Bills API caller"""
-        try:
-            if not access_token:
-                access_token = get_monnify_access_token()
-            
-            headers = {
-                'Authorization': f'Bearer {access_token}',
-                'Content-Type': 'application/json'
-            }
-            
-            url = f"{MONNIFY_BILLS_BASE_URL}/{endpoint}"
-            
-            if method.upper() == 'GET':
-                response = requests.get(url, headers=headers, timeout=8)
-            elif method.upper() == 'POST':
-                response = requests.post(url, headers=headers, json=data, timeout=8)
-            else:
-                raise Exception(f"Unsupported HTTP method: {method}")
-            
-            print(f'INFO: Monnify Bills API {method} {endpoint}: {response.status_code}')
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f'ERROR: Monnify Bills API error: {response.status_code} - {response.text}')
-                raise Exception(f'Monnify Bills API error: {response.status_code} - {response.text}')
-                
-        except Exception as e:
-            print(f'ERROR: Monnify Bills API call failed: {str(e)}')
-            raise Exception(f'Monnify Bills API failed: {str(e)}')
-    
     def generate_retention_description(base_description, savings_message, discount_applied):
         """Generate retention-focused transaction description"""
         try:
             if discount_applied > 0:
                 return f"{base_description} (Saved ₦ {discount_applied:.0f})"
             else:
+                return base_description
+        except Exception as e:
+            print(f'WARNING: Error generating retention description: {str(e)}')
+            return base_description  # Fallback to base description
                 return base_description
         except Exception as e:
             print(f'WARNING: Error generating retention description: {str(e)}')
@@ -143,31 +103,37 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         
         return pending_txn
     
-    def call_monnify_airtime(network, amount, phone_number, request_id):
-        """Call Monnify Bills API for airtime purchase"""
+    def call_monnify_airtime(network_key, amount, phone_number, request_id):
+        """Call Monnify Bills API for airtime purchase with centralized mapping and debug logging"""
         try:
-            # Step 1: Get access token
+            print(f'🔄 MONNIFY AIRTIME PURCHASE ATTEMPT:')
+            print(f'   Network Key: {network_key}')
+            print(f'   Amount: ₦{amount}')
+            print(f'   Phone: {phone_number}')
+            print(f'   Request ID: {request_id}')
+            
+            # Step 1: Get network mapping
+            mapping = PROVIDER_NETWORK_MAP.get(network_key.lower())
+            if not mapping:
+                available_networks = list(PROVIDER_NETWORK_MAP.keys())
+                raise Exception(f'Network {network_key} not supported. Available: {available_networks}')
+            
+            monnify_network = mapping['monnify']
+            print(f'   Mapped to Monnify: {monnify_network}')
+            
+            # Step 2: Get access token
             access_token = get_monnify_access_token()
             
-            # Step 2: Map network to Monnify biller code
-            network_mapping = {
-                'MTN': 'MTN',
-                'AIRTEL': 'AIRTEL', 
-                'GLO': 'GLO',
-                '9MOBILE': '9MOBILE'
-            }
-            
-            monnify_network = network_mapping.get(normalize_monnify_network(network))
-            if not monnify_network:
-                raise Exception(f'Unsupported network for Monnify: {network}')
-            
-            # Step 3: Find airtime product for this network
-            # Get billers for AIRTIME category
+            # Step 3: Find airtime biller for this network
             billers_response = call_monnify_bills_api(
                 f'billers?category_code=AIRTIME&size=100', 
                 'GET', 
                 access_token=access_token
             )
+            
+            # DEBUG: Capture the full Monnify Biller List for this category
+            available_billers = [b['name'] for b in billers_response['responseBody']['content']]
+            print(f"DEBUG: Monnify available AIRTIME billers: {available_billers}")
             
             target_biller = None
             for biller in billers_response['responseBody']['content']:
@@ -176,7 +142,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     break
             
             if not target_biller:
-                raise Exception(f'Monnify biller not found for network: {network}')
+                print(f"CRITICAL: Biller '{monnify_network}' not found in Monnify's current list: {available_billers}")
+                raise Exception(f'Monnify biller not found for network: {network_key}')
+            
+            print(f'SUCCESS: Found Monnify biller: {target_biller["name"]} (Code: {target_biller["code"]})')
             
             # Step 4: Get airtime products for this biller
             products_response = call_monnify_bills_api(
@@ -185,14 +154,15 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            # Log all products for debugging
-            print(f'INFO: All available products for {monnify_network}:')
-            for product in products_response['responseBody']['content']:
+            # DEBUG: Capture product dictionary for exact code matching
+            all_products = products_response['responseBody']['content']
+            print(f'DEBUG: All available products for {monnify_network}:')
+            for product in all_products:
                 print(f'  - Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
             
             # Strict match for airtime product (matches Monnify docs pattern)
             airtime_product = None
-            for product in products_response['responseBody']['content']:
+            for product in all_products:
                 name_lower = product['name'].lower()
                 # Match patterns from Monnify documentation: "Mobile Top Up", "Airtime", "VTU", "Recharge"
                 if (('airtime' in name_lower and 'top up' in name_lower) or 
@@ -204,10 +174,11 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             if not airtime_product:
                 # If no match found, show available products for debugging
-                available_products = [f"{p['code']}: {p['name']}" for p in products_response['responseBody']['content']]
-                raise Exception(f'No valid airtime product found for {network}. Available products: {available_products}')
+                available_products = [f"{p['code']}: {p['name']}" for p in all_products]
+                print(f"CRITICAL: No valid airtime product found for {network_key}. Available products: {available_products}")
+                raise Exception(f'No valid airtime product found for {network_key}. Available products: {available_products}')
             
-            print(f'INFO: Using Monnify product: {airtime_product["name"]} (Code: {airtime_product["code"]})')
+            print(f'SUCCESS: Using Monnify product: {airtime_product["name"]} (Code: {airtime_product["code"]})')
             
             # Step 5: Validate customer (phone number)
             validation_data = {
@@ -229,7 +200,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'productCode': airtime_product['code'],
                 'customerId': phone_number,
                 'amount': int(amount),
-                'vendReference': request_id  # ADD THIS - required for vending
+                'vendReference': request_id  # Required for vending
             }
             
             # Check if validation reference is required
@@ -240,10 +211,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     vend_data['validationReference'] = validation_ref
                     print(f'INFO: Using validation reference: {validation_ref}')
             
-            print(f'INFO: Monnify vend payload: {vend_data}')
+            print(f'DEBUG: Monnify vend payload: {vend_data}')
             
             # Step 7: Execute vend (purchase)
-            print(f'INFO: Executing Monnify vend for airtime: {network} ₦{amount}')
+            print(f'INFO: Executing Monnify vend for airtime: {network_key} ₦{amount}')
             vend_response = call_monnify_bills_api(
                 'vend',
                 'POST', 
@@ -251,11 +222,11 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            print(f'INFO: Monnify vend response: {vend_response}')
+            print(f'DEBUG: Monnify vend response: {vend_response}')
             vend_result = vend_response['responseBody']
             
             if vend_result.get('vendStatus') == 'SUCCESS':
-                print(f'SUCCESS: Monnify airtime purchase successful: {vend_result["transactionReference"]}')
+                print(f'✅ SUCCESS: Monnify airtime purchase successful: {vend_result["transactionReference"]}')
                 return {
                     'success': True,
                     'transactionReference': vend_result['transactionReference'],
@@ -280,7 +251,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 
                 final_result = requery_response['responseBody']
                 if final_result.get('vendStatus') == 'SUCCESS':
-                    print(f'SUCCESS: Monnify airtime purchase completed: {final_result["transactionReference"]}')
+                    print(f'✅ SUCCESS: Monnify airtime purchase completed: {final_result["transactionReference"]}')
                     return {
                         'success': True,
                         'transactionReference': final_result['transactionReference'],
@@ -292,31 +263,36 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                         'commission': final_result.get('commission', 0)
                     }
                 else:
+                    print(f'❌ ERROR: Monnify transaction failed after requery: {final_result.get("description", "Unknown error")}')
                     raise Exception(f'Monnify transaction failed: {final_result.get("description", "Unknown error")}')
             else:
+                print(f'❌ ERROR: Monnify vend failed: {vend_result.get("description", "Unknown error")}')
                 raise Exception(f'Monnify vend failed: {vend_result.get("description", "Unknown error")}')
                 
         except Exception as e:
-            print(f'ERROR: Monnify airtime purchase failed: {str(e)}')
+            print(f'❌ ERROR: Monnify airtime purchase failed: {str(e)}')
             raise Exception(f'Monnify airtime failed: {str(e)}')
     
-    def call_monnify_data(network, data_plan_code, phone_number, request_id):
-        """Call Monnify Bills API for data purchase"""
+    def call_monnify_data(network_key, data_plan_code, phone_number, request_id):
+        """Call Monnify Bills API for data purchase with centralized mapping and debug logging"""
         try:
-            # Step 1: Get access token
+            print(f'🔄 MONNIFY DATA PURCHASE ATTEMPT:')
+            print(f'   Network Key: {network_key}')
+            print(f'   Plan Code: {data_plan_code}')
+            print(f'   Phone: {phone_number}')
+            print(f'   Request ID: {request_id}')
+            
+            # Step 1: Get network mapping
+            mapping = PROVIDER_NETWORK_MAP.get(network_key.lower())
+            if not mapping:
+                available_networks = list(PROVIDER_NETWORK_MAP.keys())
+                raise Exception(f'Network {network_key} not supported. Available: {available_networks}')
+            
+            monnify_network = mapping['monnify']
+            print(f'   Mapped to Monnify: {monnify_network}')
+            
+            # Step 2: Get access token
             access_token = get_monnify_access_token()
-            
-            # Step 2: Map network to Monnify biller code
-            network_mapping = {
-                'MTN': 'MTN',
-                'AIRTEL': 'AIRTEL',
-                'GLO': 'GLO', 
-                '9MOBILE': '9MOBILE'
-            }
-            
-            monnify_network = network_mapping.get(normalize_monnify_network(network))
-            if not monnify_network:
-                raise Exception(f'Unsupported network for Monnify: {network}')
             
             # Step 3: Find data biller for this network
             billers_response = call_monnify_bills_api(
@@ -325,6 +301,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
+            # DEBUG: Capture the full Monnify Biller List for this category
+            available_billers = [b['name'] for b in billers_response['responseBody']['content']]
+            print(f"DEBUG: Monnify available DATA_BUNDLE billers: {available_billers}")
+            
             target_biller = None
             for biller in billers_response['responseBody']['content']:
                 if biller['name'].upper() == monnify_network:
@@ -332,7 +312,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     break
             
             if not target_biller:
-                raise Exception(f'Monnify data biller not found for network: {network}')
+                print(f"CRITICAL: Biller '{monnify_network}' not found in Monnify's current list: {available_billers}")
+                raise Exception(f'Monnify data biller not found for network: {network_key}')
+            
+            print(f'SUCCESS: Found Monnify data biller: {target_biller["name"]} (Code: {target_biller["code"]})')
             
             # Step 4: Get data products for this biller
             products_response = call_monnify_bills_api(
@@ -341,17 +324,28 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            # Find matching data product by plan code or name
+            # DEBUG: Capture product dictionary for exact code matching
+            all_products = products_response['responseBody']['content']
+            all_product_codes = [p['code'] for p in all_products]
+            print(f"DEBUG: Searching for Plan Code '{data_plan_code}' in Monnify List: {all_product_codes}")
+            print(f'DEBUG: All available data products for {monnify_network}:')
+            for product in all_products[:10]:  # Show first 10 to avoid spam
+                print(f'  - Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
+            if len(all_products) > 10:
+                print(f'  ... and {len(all_products) - 10} more products')
+            
+            # Find matching data product by plan code (STRICT MATCH ONLY)
             data_product = None
-            for product in products_response['responseBody']['content']:
+            for product in all_products:
                 if product['code'] == data_plan_code:  # Strict code match only
                     data_product = product
                     break
             
             if not data_product:
+                print(f"CRITICAL: Plan code {data_plan_code} not found for {monnify_network}. Available codes: {all_product_codes[:5]}...")
                 raise Exception(f'Monnify data product not found for plan code: {data_plan_code}')
             
-            print(f'INFO: Using Monnify data product: {data_product["name"]} (Code: {data_product["code"]})')
+            print(f'SUCCESS: Using Monnify data product: {data_product["name"]} (Code: {data_product["code"]})')
             
             # Step 5: Validate customer
             validation_data = {
@@ -377,7 +371,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'productCode': data_product['code'],
                 'customerId': phone_number,
                 'amount': vend_amount,
-                'vendReference': request_id  # ADD THIS - required for vending
+                'vendReference': request_id  # Required for vending
             }
             
             # Check validation reference requirement
@@ -388,10 +382,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     vend_data['validationReference'] = validation_ref
                     print(f'INFO: Using validation reference for data: {validation_ref}')
             
-            print(f'INFO: Monnify data vend payload: {vend_data}')
+            print(f'DEBUG: Monnify data vend payload: {vend_data}')
             
             # Step 7: Execute vend
-            print(f'INFO: Executing Monnify vend for data: {network} {data_plan_code}')
+            print(f'INFO: Executing Monnify vend for data: {network_key} {data_plan_code}')
             vend_response = call_monnify_bills_api(
                 'vend',
                 'POST',
@@ -399,11 +393,11 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            print(f'INFO: Monnify data vend response: {vend_response}')
+            print(f'DEBUG: Monnify data vend response: {vend_response}')
             vend_result = vend_response['responseBody']
             
             if vend_result.get('vendStatus') == 'SUCCESS':
-                print(f'SUCCESS: Monnify data purchase successful: {vend_result["transactionReference"]}')
+                print(f'✅ SUCCESS: Monnify data purchase successful: {vend_result["transactionReference"]}')
                 return {
                     'success': True,
                     'transactionReference': vend_result['transactionReference'],
@@ -429,7 +423,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 
                 final_result = requery_response['responseBody']
                 if final_result.get('vendStatus') == 'SUCCESS':
-                    print(f'SUCCESS: Monnify data purchase completed: {final_result["transactionReference"]}')
+                    print(f'✅ SUCCESS: Monnify data purchase completed: {final_result["transactionReference"]}')
                     return {
                         'success': True,
                         'transactionReference': final_result['transactionReference'],
@@ -442,12 +436,14 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                         'productName': data_product['name']
                     }
                 else:
+                    print(f'❌ ERROR: Monnify data transaction failed after requery: {final_result.get("description", "Unknown error")}')
                     raise Exception(f'Monnify data transaction failed: {final_result.get("description", "Unknown error")}')
             else:
+                print(f'❌ ERROR: Monnify data vend failed: {vend_result.get("description", "Unknown error")}')
                 raise Exception(f'Monnify data vend failed: {vend_result.get("description", "Unknown error")}')
                 
         except Exception as e:
-            print(f'ERROR: Monnify data purchase failed: {str(e)}')
+            print(f'❌ ERROR: Monnify data purchase failed: {str(e)}')
             raise Exception(f'Monnify data failed: {str(e)}')
 
     # ==================== PEYFLEX API FUNCTIONS (FALLBACK) ====================
@@ -567,29 +563,42 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             print(f'ERROR: Unexpected error calling Peyflex: {str(e)}')
             raise Exception(f'Unexpected error with Peyflex API: {str(e)}')
     
-    def call_peyflex_data(network, data_plan_code, phone_number, request_id):
-        """Call Peyflex Data Purchase API with exact format from documentation"""
-        # Use the exact format from Peyflex documentation
-        payload = {
-            'network': network.lower(),  # Documentation shows lowercase network names
-            'plan_code': data_plan_code,  # Use plan_code as shown in docs
-            'mobile_number': phone_number
-            # NOTE: Do NOT send request_id - not shown in documentation example
-        }
-        
-        print(f'INFO: Peyflex data purchase payload: {payload}')
-        print(f'INFO: Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
-        
-        headers = {
-            'Authorization': f'Token {PEYFLEX_API_TOKEN}',  # Documentation shows "Token" not "Bearer"
-            'Content-Type': 'application/json',
-            'User-Agent': 'FiCore-Backend/1.0'
-        }
-        
-        url = f'{PEYFLEX_BASE_URL}/api/data/purchase/'
-        print(f'INFO: Calling Peyflex data purchase API: {url}')
-        
+    def call_peyflex_data(network_key, data_plan_code, phone_number, request_id):
+        """Call Peyflex Data Purchase API with centralized mapping and enhanced success detection"""
         try:
+            print(f'🔄 PEYFLEX DATA PURCHASE ATTEMPT (FALLBACK):')
+            print(f'   Network Key: {network_key}')
+            print(f'   Plan Code: {data_plan_code}')
+            print(f'   Phone: {phone_number}')
+            
+            # Get network mapping
+            mapping = PROVIDER_NETWORK_MAP.get(network_key.lower())
+            if not mapping:
+                available_networks = list(PROVIDER_NETWORK_MAP.keys())
+                raise Exception(f'Network {network_key} not supported. Available: {available_networks}')
+            
+            peyflex_network = mapping['peyflex']
+            print(f'   Mapped to Peyflex: {peyflex_network}')
+            
+            # Use the exact format from Peyflex documentation
+            payload = {
+                'network': peyflex_network,  # Use mapped network (e.g., 'mtn_gifting_data')
+                'plan_code': data_plan_code,  # Use plan_code as shown in docs
+                'mobile_number': phone_number
+            }
+            
+            print(f'DEBUG: Peyflex data purchase payload: {payload}')
+            print(f'INFO: Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
+            
+            headers = {
+                'Authorization': f'Token {PEYFLEX_API_TOKEN}',  # Documentation shows "Token" not "Bearer"
+                'Content-Type': 'application/json',
+                'User-Agent': 'FiCore-Backend/1.0'
+            }
+            
+            url = f'{PEYFLEX_BASE_URL}/api/data/purchase/'
+            print(f'INFO: Calling Peyflex data purchase API: {url}')
+            
             response = requests.post(
                 url,
                 headers=headers,
@@ -659,10 +668,6 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 except:
                     error_msg = response.text
                 raise Exception(f'Invalid data purchase request: {error_msg}')
-            elif response.status_code == 403:
-                print('WARNING: Peyflex data purchase API returned 403 Forbidden')
-                print('INFO: This usually means: API token invalid, account not activated, or IP not whitelisted')
-                raise Exception('Data purchase service access denied - check API credentials and account status')
             elif response.status_code == 404:
                 print('WARNING: Peyflex data purchase API returned 404 Not Found')
                 raise Exception('Data purchase endpoint not found - check API URL')
