@@ -18,6 +18,7 @@ import time
 from utils.dynamic_pricing_engine import get_pricing_engine, calculate_vas_price
 from utils.emergency_pricing_recovery import tag_emergency_transaction
 from blueprints.notifications import create_user_notification
+from blueprints.vas_wallet import push_balance_update
 
 def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     vas_purchase_bp = Blueprint('vas_purchase', __name__, url_prefix='/api/vas/purchase')
@@ -1401,7 +1402,8 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             # Generate unique request ID
             request_id = generate_request_id(user_id, 'AIRTIME')
             
-            # Create PENDING transaction first (idempotency lock)
+            # 🔒 ATOMIC TRANSACTION PATTERN: Create FAILED transaction first
+            # This prevents stuck PENDING states if backend crashes during processing
             vas_transaction = {
                 '_id': ObjectId(),
                 'userId': ObjectId(user_id),
@@ -1416,7 +1418,8 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'pricingStrategy': pricing_result['strategy_used'],
                 'savingsMessage': savings_message,
                 'totalAmount': total_amount,
-                'status': 'PENDING',
+                'status': 'FAILED',  # 🔒 Start as FAILED, update to SUCCESS only when complete
+                'failureReason': 'Transaction in progress',  # Will be updated if it actually fails
                 'provider': None,
                 'requestId': request_id,
                 'transactionReference': request_id,  # CRITICAL: Add this field for unique index
@@ -1451,10 +1454,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     error_message = f'Both providers failed. Monnify: {monnify_error}, Peyflex: {peyflex_error}'
             
             if not success:
-                # Update transaction to FAILED
+                # Update transaction to FAILED with proper failure reason
                 mongo.db.vas_transactions.update_one(
                     {'_id': transaction_id},
-                    {'$set': {'status': 'FAILED', 'errorMessage': error_message, 'updatedAt': datetime.utcnow()}}
+                    {'$set': {'status': 'FAILED', 'failureReason': error_message, 'updatedAt': datetime.utcnow()}}
                 )
                 return jsonify({
                     'success': False,
@@ -1490,6 +1493,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                         'provider': provider,
                         'providerResponse': api_response,
                         'updatedAt': datetime.utcnow()
+                    },
+                    '$unset': {
+                        'failureReason': ""  # 🔒 Clear failure reason on success
                     }
                 }
             )
@@ -1751,7 +1757,8 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             # Generate unique request ID
             request_id = generate_request_id(user_id, 'DATA')
             
-            # Create PENDING transaction first (idempotency lock)
+            # 🔒 ATOMIC TRANSACTION PATTERN: Create FAILED transaction first
+            # This prevents stuck PENDING states if backend crashes during processing
             vas_transaction = {
                 '_id': ObjectId(),
                 'userId': ObjectId(user_id),
@@ -1765,10 +1772,11 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'costPrice': cost_price,
                 'margin': margin,
                 'userTier': user_tier,
-                'pricingStrategy': pricing_result['strategy_used'],
+                'pricingStrategy': 'no_margin_policy',  # Data plans use no margin policy
                 'savingsMessage': savings_message,
                 'totalAmount': total_amount,
-                'status': 'PENDING',
+                'status': 'FAILED',  # 🔒 Start as FAILED, update to SUCCESS only when complete
+                'failureReason': 'Transaction in progress',  # Will be updated if it actually fails
                 'provider': None,
                 'requestId': request_id,
                 'transactionReference': request_id,  # CRITICAL: Add this field for unique index
@@ -1860,10 +1868,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     error_message = f'Both providers failed. Monnify: {monnify_error}, Peyflex: {peyflex_error}'
             
             if not success:
-                # Update transaction to FAILED
+                # Update transaction to FAILED with proper failure reason
                 mongo.db.vas_transactions.update_one(
                     {'_id': transaction_id},
-                    {'$set': {'status': 'FAILED', 'errorMessage': error_message, 'updatedAt': datetime.utcnow()}}
+                    {'$set': {'status': 'FAILED', 'failureReason': error_message, 'updatedAt': datetime.utcnow()}}
                 )
                 return jsonify({
                     'success': False,
@@ -1900,6 +1908,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                         'provider': provider,
                         'providerResponse': api_response,
                         'updatedAt': datetime.utcnow()
+                    },
+                    '$unset': {
+                        'failureReason': ""  # 🔒 Clear failure reason on success
                     }
                 }
             )

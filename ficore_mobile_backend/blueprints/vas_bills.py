@@ -565,6 +565,40 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
             transaction_ref = f"BILL_{uuid.uuid4().hex[:12].upper()}"
             print(f'INFO: Generated transaction reference: {transaction_ref}')
             
+            # 🔒 ATOMIC TRANSACTION PATTERN: Create FAILED transaction first
+            # This prevents stuck PENDING states if backend crashes during processing
+            transaction = {
+                '_id': ObjectId(),
+                'userId': current_user['_id'],
+                'type': 'BILL',
+                'subtype': category.upper(),
+                'billCategory': category,
+                'billProvider': provider,
+                'accountNumber': account_number,
+                'customerName': customer_name,
+                'amount': amount,
+                'status': 'FAILED',  # 🔒 Start as FAILED, update to SUCCESS only when complete
+                'failureReason': 'Transaction in progress',  # Will be updated if it actually fails
+                'transactionReference': transaction_ref,
+                'description': f"Bill payment: {provider} - {account_number}",
+                'provider': 'monnify',
+                'createdAt': datetime.utcnow(),
+                'productCode': product_code,
+                'productName': product_name,
+                # These will be updated after successful processing:
+                'vendReference': None,
+                'billerCode': None,
+                'billerName': None,
+                'commission': 0,
+                'payableAmount': amount,
+                'vendAmount': amount
+            }
+            
+            # Insert FAILED transaction first
+            result = mongo.db.vas_transactions.insert_one(transaction)
+            transaction_id = result.inserted_id
+            print(f'INFO: Created atomic transaction with ID: {transaction_id}')
+            
             # Call Monnify Bills API
             access_token = get_monnify_access_token()
             
@@ -611,39 +645,41 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 vend_result = requery_response['responseBody']
             
             # Determine final status
-            final_status = vend_result.get('vendStatus', 'PENDING')
+            final_status = vend_result.get('vendStatus', 'FAILED')
             print(f'INFO: Final transaction status: {final_status}')
             
-            # Create transaction record
-            transaction = {
-                'userId': current_user['_id'],
-                'type': 'BILL',
-                'subtype': category.upper(),
-                'billCategory': category,
-                'billProvider': provider,
-                'accountNumber': account_number,
-                'customerName': customer_name,
-                'amount': amount,
-                'status': final_status,
-                'transactionReference': vend_result.get('transactionReference'),
-                'vendReference': vend_result.get('vendReference'),
-                'description': f"Bill payment: {provider} - {account_number}",
-                'provider': 'monnify',
-                'createdAt': datetime.utcnow(),
-                'productCode': product_code,
-                'productName': vend_result.get('productName', product_name),
-                'billerCode': vend_result.get('billerCode'),
-                'billerName': vend_result.get('billerName'),
-                'commission': vend_result.get('commission', 0),
-                'payableAmount': vend_result.get('payableAmount', amount),
-                'vendAmount': vend_result.get('vendAmount', amount)
+            # 🔒 ATOMIC PATTERN: Update transaction with final status and details
+            update_operation = {
+                '$set': {
+                    'status': final_status,
+                    'vendReference': vend_result.get('vendReference'),
+                    'productName': vend_result.get('productName', product_name),
+                    'billerCode': vend_result.get('billerCode'),
+                    'billerName': vend_result.get('billerName'),
+                    'commission': vend_result.get('commission', 0),
+                    'payableAmount': vend_result.get('payableAmount', amount),
+                    'vendAmount': vend_result.get('vendAmount', amount),
+                    'updatedAt': datetime.utcnow()
+                }
             }
             
-            # Insert transaction
-            result = mongo.db.vas_transactions.insert_one(transaction)
-            transaction['_id'] = result.inserted_id
+            # 🔒 Clear failureReason on success, update it on failure
+            if final_status == 'SUCCESS':
+                update_operation['$unset'] = {'failureReason': ""}
+            else:
+                failure_reason = vend_result.get('message', 'Bill payment failed')
+                update_operation['$set']['failureReason'] = failure_reason
             
-            print(f'INFO: Transaction saved with ID: {transaction["_id"]}')
+            # Update the transaction record
+            mongo.db.vas_transactions.update_one(
+                {'_id': transaction_id},
+                update_operation
+            )
+            
+            print(f'INFO: Updated transaction {transaction_id} to {final_status}')
+            
+            # Get updated transaction for response
+            updated_transaction = mongo.db.vas_transactions.find_one({'_id': transaction_id})
             
             # Update wallet balance if successful
             if final_status == 'SUCCESS':
@@ -690,7 +726,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                             'billCategory': category,
                             'provider': provider,
                             'accountNumber': account_number,
-                            'transactionId': str(transaction['_id']),
+                            'transactionId': str(transaction_id),
                             'automated': True,
                             'retentionData': {
                                 'originalPrice': amount,
@@ -727,7 +763,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                             'category': category,
                             'provider': provider,
                             'amount': amount,
-                            'transactionId': str(transaction['_id'])
+                            'transactionId': str(transaction_id)
                         }
                     )
                 except Exception as e:
@@ -737,7 +773,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 
                 return jsonify({
                     'success': True,
-                    'data': serialize_doc(transaction),
+                    'data': serialize_doc(updated_transaction),
                     'message': 'Bill payment processed successfully',
                     'user_message': {
                         'title': 'Payment Successful',
@@ -750,7 +786,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 print(f'ERROR: Transaction failed')
                 return jsonify({
                     'success': False,
-                    'data': serialize_doc(transaction),
+                    'data': serialize_doc(updated_transaction),
                     'message': 'Bill payment failed',
                     'user_message': {
                         'title': 'Payment Failed',
@@ -763,7 +799,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 print(f'INFO: Transaction pending with status: {final_status}')
                 return jsonify({
                     'success': True,
-                    'data': serialize_doc(transaction),
+                    'data': serialize_doc(updated_transaction),
                     'message': 'Bill payment is being processed',
                     'user_message': {
                         'title': 'Payment Processing',
@@ -774,6 +810,24 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
             
         except Exception as e:
             print(f'ERROR: Bill payment failed with error: {str(e)}')
+            
+            # 🔒 ATOMIC PATTERN: Ensure transaction is marked as FAILED on exception
+            try:
+                # Check if transaction_id exists (transaction was created)
+                if 'transaction_id' in locals():
+                    mongo.db.vas_transactions.update_one(
+                        {'_id': transaction_id},
+                        {
+                            '$set': {
+                                'status': 'FAILED',
+                                'failureReason': f'Exception during processing: {str(e)}',
+                                'updatedAt': datetime.utcnow()
+                            }
+                        }
+                    )
+                    print(f'INFO: Marked transaction {transaction_id} as FAILED due to exception')
+            except Exception as update_error:
+                print(f'WARNING: Failed to update transaction status: {str(update_error)}')
             
             # Handle specific errors
             error_message = str(e)
@@ -1105,7 +1159,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
             metadata = transaction.get('metadata', {})
             
             receipt_data = {
-                'transactionId': str(transaction['_id']),
+                'transactionId': str(transaction_id),
                 'type': txn_type,
                 'amount': amount,
                 'status': status,

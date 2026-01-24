@@ -4605,5 +4605,118 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                 'message': 'Failed to process refund',
                 'errors': {'general': [str(e)]}
             }), 500
+
+    @admin_bp.route('/users/<user_id>/wallet/pin-reset', methods=['POST'])
+    @token_required
+    @admin_required
+    def reset_user_vas_pin(current_user, user_id):
+        """Reset user's VAS transaction PIN - for admin panel integration"""
+        try:
+            data = request.get_json()
+            reason = data.get('reason', '').strip()
+            
+            # Validate reason is provided
+            if not reason:
+                return jsonify({
+                    'success': False,
+                    'message': 'Reason is required for audit trail',
+                    'errors': {'reason': ['Reason is required']}
+                }), 400
+            
+            if len(reason) < 10:
+                return jsonify({
+                    'success': False,
+                    'message': 'Reason must be at least 10 characters',
+                    'errors': {'reason': ['Reason must be at least 10 characters']}
+                }), 400
+            
+            # Validate user exists
+            user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+            if not user:
+                return jsonify({
+                    'success': False,
+                    'message': 'User not found'
+                }), 404
+            
+            # Get user's wallet
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'User wallet not found'
+                }), 404
+            
+            # Check if PIN was actually set
+            pin_was_set = bool(wallet.get('vasPinHash'))
+            was_locked = bool(wallet.get('pinLockedUntil') and wallet.get('pinLockedUntil') > datetime.utcnow())
+            attempts = wallet.get('pinAttempts', 0)
+            
+            # Reset PIN data
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(user_id)},
+                {
+                    '$unset': {
+                        'vasPinHash': '',
+                        'vasPinSalt': '',
+                        'pinSetupAt': '',
+                        'pinLastUsed': ''
+                    },
+                    '$set': {
+                        'pinAttempts': 0,
+                        'pinLockedUntil': None,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            # Create audit log entry
+            audit_entry = {
+                '_id': ObjectId(),
+                'adminId': current_user['_id'],
+                'adminEmail': current_user.get('email', ''),
+                'action': 'vas_pin_reset',
+                'targetUserId': ObjectId(user_id),
+                'targetUserEmail': user.get('email', ''),
+                'reason': reason,
+                'timestamp': datetime.utcnow(),
+                'details': {
+                    'pinWasSet': pin_was_set,
+                    'wasLocked': was_locked,
+                    'failedAttempts': attempts,
+                    'resetBy': current_user.get('displayName', 'Admin'),
+                    'resetAt': datetime.utcnow().isoformat() + 'Z'
+                }
+            }
+            
+            mongo.db.admin_actions.insert_one(audit_entry)
+            
+            print(f'SUCCESS: Admin {current_user.get("email")} reset VAS PIN for user {user_id} ({user.get("email")}) - Reason: {reason}')
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'resetAt': datetime.utcnow().isoformat() + 'Z',
+                    'targetUserId': user_id,
+                    'targetUserEmail': user.get('email', ''),
+                    'targetUserName': user.get('displayName', ''),
+                    'adminEmail': current_user.get('email', ''),
+                    'adminName': current_user.get('displayName', 'Admin'),
+                    'reason': reason,
+                    'previousState': {
+                        'pinWasSet': pin_was_set,
+                        'wasLocked': was_locked,
+                        'failedAttempts': attempts
+                    }
+                },
+                'message': f'VAS PIN reset successfully for {user.get("displayName", "user")}'
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Admin PIN reset failed: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'PIN reset failed',
+                'error': str(e)
+            }), 500
          
     return admin_bp

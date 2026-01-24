@@ -98,7 +98,8 @@ def process_atomic_vas_transaction():
                 'phoneNumber': data.get('phoneNumber'),
                 'network': data.get('network'),
                 'dataPlan': data.get('dataPlan'),
-                'status': 'PENDING',
+                'status': 'FAILED',  # 🔒 ATOMIC PATTERN: Start as FAILED, update to SUCCESS only when complete
+                'failureReason': 'Transaction in progress',  # Will be updated if it actually fails
                 'provider': 'peyflex',  # or determine dynamically
                 'transactionReference': idempotency_key,  # CRITICAL: Add this field for unique index
                 'createdAt': datetime.utcnow(),
@@ -110,7 +111,7 @@ def process_atomic_vas_transaction():
                 'auditLog': [{
                     'action': 'CREATED',
                     'timestamp': datetime.utcnow(),
-                    'details': 'Transaction created with atomic protection'
+                    'details': 'Transaction created with atomic protection - starts as FAILED'
                 }]
             }
             
@@ -170,22 +171,31 @@ def process_atomic_vas_transaction():
             # 5. Update transaction status based on provider response
             final_status = 'SUCCESS' if provider_response['success'] else 'FAILED'
             
+            # Prepare update operation
+            update_operation = {
+                '$set': {
+                    'status': final_status,
+                    'providerResponse': provider_response,
+                    'updatedAt': datetime.utcnow()
+                },
+                '$push': {
+                    'auditLog': {
+                        'action': 'PROVIDER_RESPONSE',
+                        'timestamp': datetime.utcnow(),
+                        'details': f'Provider returned: {final_status}'
+                    }
+                }
+            }
+            
+            # 🔒 Clear failureReason on success, update it on failure
+            if final_status == 'SUCCESS':
+                update_operation['$unset'] = {'failureReason': ""}
+            else:
+                update_operation['$set']['failureReason'] = provider_response.get('message', 'Provider transaction failed')
+            
             db.vas_transactions.update_one(
                 {'_id': transaction_id},
-                {
-                    '$set': {
-                        'status': final_status,
-                        'providerResponse': provider_response,
-                        'updatedAt': datetime.utcnow()
-                    },
-                    '$push': {
-                        'auditLog': {
-                            'action': 'PROVIDER_RESPONSE',
-                            'timestamp': datetime.utcnow(),
-                            'details': f'Provider returned: {final_status}'
-                        }
-                    }
-                },
+                update_operation,
                 session=session
             )
             

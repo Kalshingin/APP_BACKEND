@@ -1016,6 +1016,14 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
         result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
         return jsonify(result), status_code
     
+    @vas_wallet_bp.route('/reserved-accounts/with-banks', methods=['GET'])
+    @token_required
+    def get_reserved_accounts_with_banks(current_user):
+        """Get user's reserved accounts with available banks (explicit endpoint for frontend compatibility)"""
+        # Call the same business logic function as /reserved-accounts
+        result, status_code = _get_reserved_accounts_with_banks_logic(current_user)
+        return jsonify(result), status_code
+    
     def _get_reserved_accounts_with_banks_logic(current_user):
         """Business logic for getting user's reserved accounts with available banks"""
         try:
@@ -1470,9 +1478,40 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                     'createdAt': created_at.isoformat() + 'Z',
                     'date': created_at.isoformat() + 'Z',
                     'category': 'VAS',
+                    
+                    # 🎯 CRITICAL FIX: Include ALL VAS transaction fields for proper receipt display
+                    'network': txn.get('network', ''),
+                    'phoneNumber': txn.get('phoneNumber', ''),
+                    'dataPlan': txn.get('dataPlan', ''),
+                    'dataPlanId': txn.get('dataPlanId', ''),
+                    'dataPlanName': txn.get('dataPlanName', ''),
+                    'transactionReference': txn.get('transactionReference', ''),
+                    
+                    # Bills-specific fields
+                    'billCategory': txn.get('billCategory', ''),
+                    'billProvider': txn.get('billProvider', ''),
+                    'accountNumber': txn.get('accountNumber', ''),
+                    'customerName': txn.get('customerName', ''),
+                    'packageId': txn.get('packageId', ''),
+                    'packageName': txn.get('packageName', ''),
+                    
                     'metadata': {
                         'phoneNumber': txn.get('phoneNumber', ''),
-                        'planName': txn.get('planName', ''),
+                        'network': txn.get('network', ''),
+                        'planName': txn.get('dataPlan', '') or txn.get('dataPlanName', ''),
+                        'dataPlan': txn.get('dataPlan', ''),
+                        'dataPlanName': txn.get('dataPlanName', ''),
+                        'dataPlanId': txn.get('dataPlanId', ''),
+                        'transactionReference': txn.get('transactionReference', ''),
+                        'provider': txn.get('provider', ''),
+                        
+                        # Bills-specific metadata
+                        'billCategory': txn.get('billCategory', ''),
+                        'billProvider': txn.get('billProvider', ''),
+                        'accountNumber': txn.get('accountNumber', ''),
+                        'customerName': txn.get('customerName', ''),
+                        'packageId': txn.get('packageId', ''),
+                        'packageName': txn.get('packageName', ''),
                     }
                 })
             
@@ -2001,4 +2040,494 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
     
+    # ==================== PIN MANAGEMENT ENDPOINTS ====================
+    
+    @vas_wallet_bp.route('/pin/setup', methods=['POST'])
+    @token_required
+    def setup_vas_pin(current_user):
+        """Set up VAS transaction PIN - stores both locally and on server"""
+        try:
+            user_id = str(current_user['_id'])
+            data = request.get_json()
+            
+            pin = data.get('pin', '').strip()
+            
+            # Validate PIN format
+            if not pin or len(pin) != 4 or not pin.isdigit():
+                return jsonify({
+                    'success': False,
+                    'message': 'PIN must be exactly 4 digits',
+                    'errors': {'pin': ['PIN must be exactly 4 digits']}
+                }), 400
+            
+            # Check for weak PINs
+            weak_pins = ['0000', '1111', '2222', '3333', '4444', '5555', '6666', '7777', '8888', '9999', '1234', '4321', '0123', '9876']
+            if pin in weak_pins:
+                return jsonify({
+                    'success': False,
+                    'message': 'Please choose a stronger PIN',
+                    'errors': {'pin': ['This PIN is too common. Please choose a different one.']}
+                }), 400
+            
+            # Get or create wallet
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet not found. Please create a wallet first.'
+                }), 404
+            
+            # Check if PIN already exists
+            if wallet.get('vasPinHash'):
+                return jsonify({
+                    'success': False,
+                    'message': 'PIN already exists. Use change PIN instead.'
+                }), 400
+            
+            # Generate salt and hash PIN (same algorithm as frontend)
+            import secrets
+            import hashlib
+            import base64
+            
+            salt = base64.b64encode(secrets.token_bytes(32)).decode('utf-8')
+            pin_hash = hashlib.sha256((pin + salt).encode()).hexdigest()
+            
+            # Update wallet with PIN data
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'vasPinHash': pin_hash,
+                        'vasPinSalt': salt,
+                        'pinSetupAt': datetime.utcnow(),
+                        'pinAttempts': 0,
+                        'pinLockedUntil': None,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            print(f'SUCCESS: VAS PIN setup completed for user {user_id}')
+            
+            return jsonify({
+                'success': True,
+                'message': 'PIN setup completed successfully',
+                'data': {
+                    'pinSetup': True,
+                    'setupAt': datetime.utcnow().isoformat() + 'Z'
+                }
+            }), 201
+            
+        except Exception as e:
+            print(f'ERROR: Error setting up VAS PIN: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to setup PIN',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_wallet_bp.route('/pin/validate', methods=['POST'])
+    @token_required
+    def validate_vas_pin(current_user):
+        """Validate VAS transaction PIN"""
+        try:
+            user_id = str(current_user['_id'])
+            data = request.get_json()
+            
+            pin = data.get('pin', '').strip()
+            
+            if not pin:
+                return jsonify({
+                    'success': False,
+                    'message': 'PIN is required',
+                    'errors': {'pin': ['PIN is required']}
+                }), 400
+            
+            # Get wallet with PIN data
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet not found'
+                }), 404
+            
+            # Check if PIN is set up
+            stored_hash = wallet.get('vasPinHash')
+            stored_salt = wallet.get('vasPinSalt')
+            
+            if not stored_hash or not stored_salt:
+                return jsonify({
+                    'success': False,
+                    'message': 'PIN not set up. Please set up your transaction PIN first.',
+                    'errors': {'pin': ['PIN not set up']}
+                }), 400
+            
+            # Check if account is locked out
+            locked_until = wallet.get('pinLockedUntil')
+            if locked_until and locked_until > datetime.utcnow():
+                minutes_remaining = int((locked_until - datetime.utcnow()).total_seconds() / 60) + 1
+                return jsonify({
+                    'success': False,
+                    'message': f'Account locked. Try again in {minutes_remaining} minutes.',
+                    'errors': {'pin': [f'Too many failed attempts. Try again in {minutes_remaining} minutes.']},
+                    'lockoutMinutes': minutes_remaining
+                }), 423  # HTTP 423 Locked
+            
+            # Validate PIN
+            import hashlib
+            input_hash = hashlib.sha256((pin + stored_salt).encode()).hexdigest()
+            
+            if input_hash == stored_hash:
+                # PIN is correct - reset attempts and update last used
+                mongo.db.vas_wallets.update_one(
+                    {'userId': ObjectId(user_id)},
+                    {
+                        '$set': {
+                            'pinAttempts': 0,
+                            'pinLockedUntil': None,
+                            'pinLastUsed': datetime.utcnow(),
+                            'updatedAt': datetime.utcnow()
+                        }
+                    }
+                )
+                
+                return jsonify({
+                    'success': True,
+                    'message': 'PIN validated successfully',
+                    'data': {
+                        'valid': True,
+                        'lastUsed': datetime.utcnow().isoformat() + 'Z'
+                    }
+                }), 200
+            else:
+                # PIN is incorrect - increment attempts
+                attempts = wallet.get('pinAttempts', 0) + 1
+                max_attempts = 3
+                lockout_minutes = 15
+                
+                update_data = {
+                    'pinAttempts': attempts,
+                    'updatedAt': datetime.utcnow()
+                }
+                
+                if attempts >= max_attempts:
+                    # Lock account
+                    lockout_until = datetime.utcnow() + timedelta(minutes=lockout_minutes)
+                    update_data['pinLockedUntil'] = lockout_until
+                    
+                    mongo.db.vas_wallets.update_one(
+                        {'userId': ObjectId(user_id)},
+                        {'$set': update_data}
+                    )
+                    
+                    return jsonify({
+                        'success': False,
+                        'message': f'Too many failed attempts. Account locked for {lockout_minutes} minutes.',
+                        'errors': {'pin': [f'Account locked for {lockout_minutes} minutes due to too many failed attempts.']},
+                        'lockoutMinutes': lockout_minutes
+                    }), 423  # HTTP 423 Locked
+                else:
+                    mongo.db.vas_wallets.update_one(
+                        {'userId': ObjectId(user_id)},
+                        {'$set': update_data}
+                    )
+                    
+                    attempts_left = max_attempts - attempts
+                    return jsonify({
+                        'success': False,
+                        'message': f'Incorrect PIN. {attempts_left} attempts remaining.',
+                        'errors': {'pin': [f'Incorrect PIN. {attempts_left} attempts remaining.']},
+                        'attemptsRemaining': attempts_left
+                    }), 400
+            
+        except Exception as e:
+            print(f'ERROR: Error validating VAS PIN: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to validate PIN',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_wallet_bp.route('/pin/change', methods=['POST'])
+    @token_required
+    def change_vas_pin(current_user):
+        """Change existing VAS transaction PIN"""
+        try:
+            user_id = str(current_user['_id'])
+            data = request.get_json()
+            
+            old_pin = data.get('oldPin', '').strip()
+            new_pin = data.get('newPin', '').strip()
+            
+            # Validate inputs
+            if not old_pin or not new_pin:
+                return jsonify({
+                    'success': False,
+                    'message': 'Both old and new PIN are required',
+                    'errors': {'pin': ['Both old and new PIN are required']}
+                }), 400
+            
+            if len(new_pin) != 4 or not new_pin.isdigit():
+                return jsonify({
+                    'success': False,
+                    'message': 'New PIN must be exactly 4 digits',
+                    'errors': {'newPin': ['New PIN must be exactly 4 digits']}
+                }), 400
+            
+            if old_pin == new_pin:
+                return jsonify({
+                    'success': False,
+                    'message': 'New PIN must be different from current PIN',
+                    'errors': {'newPin': ['New PIN must be different from current PIN']}
+                }), 400
+            
+            # Check for weak PINs
+            weak_pins = ['0000', '1111', '2222', '3333', '4444', '5555', '6666', '7777', '8888', '9999', '1234', '4321', '0123', '9876']
+            if new_pin in weak_pins:
+                return jsonify({
+                    'success': False,
+                    'message': 'Please choose a stronger PIN',
+                    'errors': {'newPin': ['This PIN is too common. Please choose a different one.']}
+                }), 400
+            
+            # Get wallet
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Wallet not found'
+                }), 404
+            
+            # Validate old PIN first
+            stored_hash = wallet.get('vasPinHash')
+            stored_salt = wallet.get('vasPinSalt')
+            
+            if not stored_hash or not stored_salt:
+                return jsonify({
+                    'success': False,
+                    'message': 'No PIN set up. Please set up your PIN first.'
+                }), 400
+            
+            # Check lockout
+            locked_until = wallet.get('pinLockedUntil')
+            if locked_until and locked_until > datetime.utcnow():
+                minutes_remaining = int((locked_until - datetime.utcnow()).total_seconds() / 60) + 1
+                return jsonify({
+                    'success': False,
+                    'message': f'Account locked. Try again in {minutes_remaining} minutes.',
+                    'lockoutMinutes': minutes_remaining
+                }), 423
+            
+            # Validate old PIN
+            import hashlib
+            old_pin_hash = hashlib.sha256((old_pin + stored_salt).encode()).hexdigest()
+            
+            if old_pin_hash != stored_hash:
+                return jsonify({
+                    'success': False,
+                    'message': 'Current PIN is incorrect',
+                    'errors': {'oldPin': ['Current PIN is incorrect']}
+                }), 400
+            
+            # Generate new salt and hash for new PIN
+            import secrets
+            import base64
+            
+            new_salt = base64.b64encode(secrets.token_bytes(32)).decode('utf-8')
+            new_pin_hash = hashlib.sha256((new_pin + new_salt).encode()).hexdigest()
+            
+            # Update wallet with new PIN
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'vasPinHash': new_pin_hash,
+                        'vasPinSalt': new_salt,
+                        'pinAttempts': 0,
+                        'pinLockedUntil': None,
+                        'pinLastUsed': datetime.utcnow(),
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            print(f'SUCCESS: VAS PIN changed for user {user_id}')
+            
+            return jsonify({
+                'success': True,
+                'message': 'PIN changed successfully',
+                'data': {
+                    'changed': True,
+                    'changedAt': datetime.utcnow().isoformat() + 'Z'
+                }
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error changing VAS PIN: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to change PIN',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_wallet_bp.route('/pin/status', methods=['GET'])
+    @token_required
+    def get_pin_status(current_user):
+        """Get PIN status for UI display"""
+        try:
+            user_id = str(current_user['_id'])
+            
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'isSetup': False,
+                        'isLocked': False,
+                        'attemptsRemaining': 3,
+                        'lockoutMinutes': 0
+                    },
+                    'message': 'Wallet not found'
+                }), 200
+            
+            is_setup = bool(wallet.get('vasPinHash'))
+            attempts = wallet.get('pinAttempts', 0)
+            max_attempts = 3
+            attempts_remaining = max_attempts - attempts
+            
+            # Check lockout status
+            locked_until = wallet.get('pinLockedUntil')
+            is_locked = False
+            lockout_minutes = 0
+            
+            if locked_until and locked_until > datetime.utcnow():
+                is_locked = True
+                lockout_minutes = int((locked_until - datetime.utcnow()).total_seconds() / 60) + 1
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'isSetup': is_setup,
+                    'isLocked': is_locked,
+                    'attemptsRemaining': max(0, attempts_remaining),
+                    'lockoutMinutes': lockout_minutes,
+                    'setupAt': wallet.get('pinSetupAt').isoformat() + 'Z' if wallet.get('pinSetupAt') else None,
+                    'lastUsed': wallet.get('pinLastUsed').isoformat() + 'Z' if wallet.get('pinLastUsed') else None
+                },
+                'message': 'PIN status retrieved successfully'
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error getting PIN status: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to get PIN status',
+                'errors': {'general': [str(e)]}
+            }), 500
+    
+    @vas_wallet_bp.route('/pin/reset', methods=['POST'])
+    @token_required
+    def admin_reset_pin(current_user):
+        """Admin endpoint to reset user's VAS PIN - for integration with web admin panel"""
+        try:
+            # Check if current user is admin
+            if current_user.get('role') != 'admin':
+                return jsonify({
+                    'success': False,
+                    'message': 'Admin access required'
+                }), 403
+            
+            data = request.get_json()
+            target_user_id = data.get('userId', '').strip()
+            admin_reason = data.get('reason', '').strip()
+            
+            if not target_user_id:
+                return jsonify({
+                    'success': False,
+                    'message': 'User ID is required',
+                    'errors': {'userId': ['User ID is required']}
+                }), 400
+            
+            if not admin_reason:
+                return jsonify({
+                    'success': False,
+                    'message': 'Reason is required for audit trail',
+                    'errors': {'reason': ['Reason is required']}
+                }), 400
+            
+            # Validate target user exists
+            target_user = mongo.db.users.find_one({'_id': ObjectId(target_user_id)})
+            if not target_user:
+                return jsonify({
+                    'success': False,
+                    'message': 'Target user not found'
+                }), 404
+            
+            # Get target user's wallet
+            wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(target_user_id)})
+            if not wallet:
+                return jsonify({
+                    'success': False,
+                    'message': 'Target user wallet not found'
+                }), 404
+            
+            # Reset PIN data
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(target_user_id)},
+                {
+                    '$unset': {
+                        'vasPinHash': '',
+                        'vasPinSalt': '',
+                        'pinSetupAt': '',
+                        'pinLastUsed': ''
+                    },
+                    '$set': {
+                        'pinAttempts': 0,
+                        'pinLockedUntil': None,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            # Log admin action for audit trail
+            admin_action = {
+                '_id': ObjectId(),
+                'adminId': current_user['_id'],
+                'adminEmail': current_user.get('email', ''),
+                'action': 'vas_pin_reset',
+                'targetUserId': ObjectId(target_user_id),
+                'targetUserEmail': target_user.get('email', ''),
+                'reason': admin_reason,
+                'timestamp': datetime.utcnow(),
+                'details': {
+                    'pinWasSet': bool(wallet.get('vasPinHash')),
+                    'wasLocked': bool(wallet.get('pinLockedUntil') and wallet.get('pinLockedUntil') > datetime.utcnow()),
+                    'attempts': wallet.get('pinAttempts', 0)
+                }
+            }
+            
+            mongo.db.admin_actions.insert_one(admin_action)
+            
+            print(f'SUCCESS: Admin {current_user["email"]} reset VAS PIN for user {target_user_id} - Reason: {admin_reason}')
+            
+            return jsonify({
+                'success': True,
+                'message': 'PIN reset successfully',
+                'data': {
+                    'resetAt': datetime.utcnow().isoformat() + 'Z',
+                    'targetUserId': target_user_id,
+                    'targetUserEmail': target_user.get('email', ''),
+                    'adminEmail': current_user.get('email', ''),
+                    'reason': admin_reason
+                }
+            }), 200
+            
+        except Exception as e:
+            print(f'ERROR: Error resetting VAS PIN: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': 'Failed to reset PIN',
+                'errors': {'general': [str(e)]}
+            }), 500
+
     return vas_wallet_bp
