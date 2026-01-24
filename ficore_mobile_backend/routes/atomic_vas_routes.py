@@ -100,6 +100,7 @@ def process_atomic_vas_transaction():
                 'dataPlan': data.get('dataPlan'),
                 'status': 'PENDING',
                 'provider': 'peyflex',  # or determine dynamically
+                'transactionReference': idempotency_key,  # CRITICAL: Add this field for unique index
                 'createdAt': datetime.utcnow(),
                 'updatedAt': datetime.utcnow(),
                 'tierChanged': tier_changed,
@@ -121,7 +122,7 @@ def process_atomic_vas_transaction():
                 'userId': ObjectId(user_id),
                 'type': 'VAS_TRANSACTION',
                 'category': transaction_type,
-                'amount': total_amount,
+                'amount': amount,  # Use actual purchase amount, not total_amount (fees eliminated)
                 'description': f'{transaction_type} - {data.get("network", "")} {data.get("phoneNumber", "")}',
                 'transactionId': transaction_id,
                 'idempotencyKey': idempotency_key,
@@ -133,7 +134,7 @@ def process_atomic_vas_transaction():
                 'auditLog': [{
                     'action': 'CREATED',
                     'timestamp': datetime.utcnow(),
-                    'details': 'Expense entry created atomically with VAS transaction'
+                    'details': 'Expense entry created atomically with VAS transaction - fees eliminated'
                 }]
             }
             
@@ -144,15 +145,15 @@ def process_atomic_vas_transaction():
                 wallet_update_result = db.user_wallets.update_one(
                     {'userId': ObjectId(user_id)},
                     {
-                        '$inc': {'balance': -total_amount},
+                        '$inc': {'balance': -amount},  # Debit actual purchase amount (fees eliminated)
                         '$set': {'updatedAt': datetime.utcnow()},
                         '$push': {
                             'auditLog': {
                                 'action': 'VAS_DEBIT',
-                                'amount': -total_amount,
+                                'amount': -amount,  # Debit actual purchase amount
                                 'transactionId': transaction_id,
                                 'timestamp': datetime.utcnow(),
-                                'details': f'VAS transaction: {transaction_type}'
+                                'details': f'VAS transaction: {transaction_type} - fees eliminated'
                             }
                         }
                     },
@@ -216,8 +217,8 @@ def process_atomic_vas_transaction():
                     'status': final_status,
                     'type': transaction_type,
                     'amount': amount,
-                    'transactionFee': data.get('transactionFee', 0),
-                    'totalAmount': total_amount,
+                    'transactionFee': 0.0,  # Fees eliminated for VAS purchases
+                    'totalAmount': amount,  # Total is now same as amount (fees eliminated)
                     'tier': current_tier,
                     'tierChanged': tier_changed,
                     'network': data.get('network'),
@@ -225,7 +226,8 @@ def process_atomic_vas_transaction():
                     'dataPlan': data.get('dataPlan'),
                     'provider': 'peyflex',
                     'createdAt': datetime.utcnow().isoformat(),
-                    'idempotencyKey': idempotency_key
+                    'idempotencyKey': idempotency_key,
+                    'feesEliminated': True  # Flag to indicate fees have been eliminated
                 }
             })
             
