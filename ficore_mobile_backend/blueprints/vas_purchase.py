@@ -55,7 +55,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             url = f"{MONNIFY_BASE_URL}/api/v1/auth/login"
             
-            response = requests.post(url, headers=headers, timeout=30)
+            response = requests.post(url, headers=headers, timeout=8)
             
             if response.status_code == 200:
                 data = response.json()
@@ -86,9 +86,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             url = f"{MONNIFY_BILLS_BASE_URL}/{endpoint}"
             
             if method.upper() == 'GET':
-                response = requests.get(url, headers=headers, timeout=30)
+                response = requests.get(url, headers=headers, timeout=8)
             elif method.upper() == 'POST':
-                response = requests.post(url, headers=headers, json=data, timeout=30)
+                response = requests.post(url, headers=headers, json=data, timeout=8)
             else:
                 raise Exception(f"Unsupported HTTP method: {method}")
             
@@ -205,13 +205,11 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             print(f'SUCCESS: Monnify customer validation successful for {phone_number}')
             
-            # Step 6: Prepare vend request
+            # Step 6: Prepare vend request (EXACT match to Monnify API spec)
             vend_data = {
                 'productCode': airtime_product['code'],
                 'customerId': phone_number,
                 'amount': int(amount),
-                'reference': request_id,  # Use our unique request ID
-                'phoneNumber': phone_number,
                 'emailAddress': 'customer@ficoreafrica.com'  # Default email
             }
             
@@ -222,6 +220,8 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 if validation_ref:
                     vend_data['validationReference'] = validation_ref
                     print(f'INFO: Using validation reference: {validation_ref}')
+            
+            print(f'INFO: Monnify vend payload: {vend_data}')
             
             # Step 7: Execute vend (purchase)
             vend_response = call_monnify_bills_api(
@@ -366,8 +366,6 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'productCode': data_product['code'],
                 'customerId': phone_number,
                 'amount': vend_amount,
-                'reference': request_id,
-                'phoneNumber': phone_number,
                 'emailAddress': 'customer@ficoreafrica.com'
             }
             
@@ -378,6 +376,8 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 if validation_ref:
                     vend_data['validationReference'] = validation_ref
                     print(f'INFO: Using validation reference for data: {validation_ref}')
+            
+            print(f'INFO: Monnify data vend payload: {vend_data}')
             
             # Step 7: Execute vend
             vend_response = call_monnify_bills_api(
@@ -466,7 +466,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 url,
                 headers=headers,
                 json=payload,
-                timeout=30
+                timeout=12
             )
             
             print(f'INFO: Peyflex airtime response: {response.status_code}')
@@ -536,7 +536,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 url,
                 headers=headers,
                 json=payload,
-                timeout=30
+                timeout=12
             )
             
             print(f'INFO: Peyflex data purchase response: {response.status_code}')
@@ -848,7 +848,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 url = f'{PEYFLEX_BASE_URL}/api/airtime/networks/'
                 print(f'INFO: Calling Peyflex airtime networks API: {url}')
                 
-                response = requests.get(url, timeout=30)
+                response = requests.get(url, timeout=10)
                 print(f'INFO: Peyflex airtime networks response status: {response.status_code}')
                 
                 if response.status_code == 200:
@@ -967,7 +967,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 print(f'INFO: Calling Peyflex networks API: {url}')
                 
                 try:
-                    response = requests.get(url, headers=headers, timeout=30)
+                    response = requests.get(url, headers=headers, timeout=10)
                     print(f'INFO: Peyflex networks response status: {response.status_code}')
                     
                     if response.status_code == 200:
@@ -1189,7 +1189,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 print(f'INFO: Calling Peyflex plans API: {url}')
                 
                 try:
-                    response = requests.get(url, headers=headers, timeout=30)
+                    response = requests.get(url, headers=headers, timeout=10)
                     print(f'INFO: Peyflex plans response status: {response.status_code}')
                     print(f'INFO: Response preview: {response.text[:500]}')
                     

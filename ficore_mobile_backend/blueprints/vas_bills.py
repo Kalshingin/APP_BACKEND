@@ -46,7 +46,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
             
             url = f"{MONNIFY_BASE_URL}/api/v1/auth/login"
             
-            response = requests.post(url, headers=headers, timeout=30)
+            response = requests.post(url, headers=headers, timeout=8)
             
             if response.status_code == 200:
                 data = response.json()
@@ -77,9 +77,9 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
             url = f"{MONNIFY_BILLS_BASE_URL}/{endpoint}"
             
             if method.upper() == 'GET':
-                response = requests.get(url, headers=headers, timeout=30)
+                response = requests.get(url, headers=headers, timeout=8)
             elif method.upper() == 'POST':
-                response = requests.post(url, headers=headers, json=data, timeout=30)
+                response = requests.post(url, headers=headers, json=data, timeout=8)
             else:
                 raise Exception(f"Unsupported HTTP method: {method}")
             
@@ -606,9 +606,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 'productCode': product_code,
                 'customerId': account_number,
                 'amount': amount,
-                'emailAddress': current_user.get('email', ''),
-                'phoneNumber': current_user.get('phoneNumber', ''),
-                'reference': transaction_ref
+                'emailAddress': current_user.get('email', 'customer@ficoreafrica.com')
             }
             
             # Add validation reference if required
