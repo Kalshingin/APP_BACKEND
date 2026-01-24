@@ -185,15 +185,27 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            # Find airtime product (usually has "Top up" or "Airtime" in name)
+            # Log all products for debugging
+            print(f'INFO: All available products for {monnify_network}:')
+            for product in products_response['responseBody']['content']:
+                print(f'  - Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
+            
+            # Strict match for airtime product (matches Monnify docs pattern)
             airtime_product = None
             for product in products_response['responseBody']['content']:
-                if 'airtime' in product['name'].lower() or 'top up' in product['name'].lower():
+                name_lower = product['name'].lower()
+                # Match patterns from Monnify documentation: "Mobile Top Up", "Airtime", "VTU", "Recharge"
+                if (('airtime' in name_lower and 'top up' in name_lower) or 
+                    ('mobile' in name_lower and 'top up' in name_lower) or
+                    ('vtu' in name_lower) or
+                    ('recharge' in name_lower and 'airtime' in name_lower)):
                     airtime_product = product
                     break
             
             if not airtime_product:
-                raise Exception(f'Monnify airtime product not found for {network}')
+                # If no match found, show available products for debugging
+                available_products = [f"{p['code']}: {p['name']}" for p in products_response['responseBody']['content']]
+                raise Exception(f'No valid airtime product found for {network}. Available products: {available_products}')
             
             print(f'INFO: Using Monnify product: {airtime_product["name"]} (Code: {airtime_product["code"]})')
             
@@ -473,7 +485,52 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             print(f'INFO: Peyflex airtime response: {response.status_code}')
             print(f'INFO: Response body: {response.text[:500]}')
             
-            if response.status_code == 200:
+            # Handle success cases - Peyflex may return 403 but still succeed
+            if response.status_code in [200, 403]:  # Allow 403 if it succeeds in practice
+                if response.status_code == 403:
+                    print('WARNING: Peyflex status 403 - checking response body for success indicators')
+                
+                try:
+                    json_resp = response.json()
+                    
+                    # Check for success keywords (case-insensitive)
+                    status_lower = str(json_resp.get('status', '')).lower()
+                    message_lower = str(json_resp.get('message', '')).lower()
+                    
+                    if ('success' in status_lower or 'successful' in message_lower or 
+                        'credited' in message_lower or 'completed' in message_lower or
+                        'approved' in message_lower):
+                        print('INFO: Peyflex success detected via keywords in JSON response')
+                        return json_resp
+                    elif response.status_code == 200:
+                        # For 200 status, assume success even without keywords
+                        return json_resp
+                    else:
+                        print(f'WARNING: Peyflex 403 without success keywords: {message_lower}')
+                        # Continue to check raw text below
+                        
+                except Exception as json_error:
+                    print(f'INFO: JSON parse failed, checking raw text: {json_error}')
+                    # Continue to check raw text below
+                
+                # If JSON parse fails or no success keywords, check raw text
+                text_lower = response.text.lower()
+                if ('success' in text_lower or 'credited' in text_lower or 
+                    'completed' in text_lower or 'approved' in text_lower):
+                    print('INFO: Peyflex success detected in raw response text')
+                    return {
+                        'success': True, 
+                        'message': 'Success detected in response text',
+                        'raw_response': response.text,
+                        'status_code': response.status_code
+                    }
+                
+                # If 403 with no success indicators, treat as failure
+                if response.status_code == 403:
+                    print('ERROR: Peyflex 403 with no success indicators - treating as failure')
+                    raise Exception('Airtime service access denied - check API credentials and account status')
+                    
+            elif response.status_code == 200:
                 try:
                     return response.json()
                 except Exception as json_error:
@@ -543,7 +600,52 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             print(f'INFO: Peyflex data purchase response: {response.status_code}')
             print(f'INFO: Response body: {response.text[:500]}')
             
-            if response.status_code == 200:
+            # Handle success cases - Peyflex may return 403 but still succeed
+            if response.status_code in [200, 403]:  # Allow 403 if it succeeds in practice
+                if response.status_code == 403:
+                    print('WARNING: Peyflex data status 403 - checking response body for success indicators')
+                
+                try:
+                    json_resp = response.json()
+                    
+                    # Check for success keywords (case-insensitive)
+                    status_lower = str(json_resp.get('status', '')).lower()
+                    message_lower = str(json_resp.get('message', '')).lower()
+                    
+                    if ('success' in status_lower or 'successful' in message_lower or 
+                        'credited' in message_lower or 'completed' in message_lower or
+                        'approved' in message_lower):
+                        print('INFO: Peyflex data success detected via keywords in JSON response')
+                        return json_resp
+                    elif response.status_code == 200:
+                        # For 200 status, assume success even without keywords
+                        return json_resp
+                    else:
+                        print(f'WARNING: Peyflex data 403 without success keywords: {message_lower}')
+                        # Continue to check raw text below
+                        
+                except Exception as json_error:
+                    print(f'INFO: JSON parse failed, checking raw text: {json_error}')
+                    # Continue to check raw text below
+                
+                # If JSON parse fails or no success keywords, check raw text
+                text_lower = response.text.lower()
+                if ('success' in text_lower or 'credited' in text_lower or 
+                    'completed' in text_lower or 'approved' in text_lower):
+                    print('INFO: Peyflex data success detected in raw response text')
+                    return {
+                        'success': True, 
+                        'message': 'Success detected in response text',
+                        'raw_response': response.text,
+                        'status_code': response.status_code
+                    }
+                
+                # If 403 with no success indicators, treat as failure
+                if response.status_code == 403:
+                    print('ERROR: Peyflex data 403 with no success indicators - treating as failure')
+                    raise Exception('Data purchase service access denied - check API credentials and account status')
+                    
+            elif response.status_code == 200:
                 try:
                     return response.json()
                 except Exception as json_error:
