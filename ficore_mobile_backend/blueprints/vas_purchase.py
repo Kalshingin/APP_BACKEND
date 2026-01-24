@@ -42,8 +42,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     PROVIDER_NETWORK_MAP = {
         'mtn': {
             'monnify': 'MTN',
-            'peyflex': 'mtn_sme_data'  # or mtn_sme_data based on your UI
+            'peyflex': 'mtn_sme_data'  # or mtn_gifting_data based on your UI
         },
+        
         'airtel': {
             'monnify': 'AIRTEL',
             'peyflex': 'airtel_data'
@@ -51,6 +52,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         'glo': {
             'monnify': 'GLO',
             'peyflex': 'glo_data'
+        },
+        'mtn': {
+            'monnify': 'MTN',
+            'peyflex': 'mtn_gifting_data'  # or mtn_sme_data based on your UI
         },
         '9mobile': {
             'monnify': '9MOBILE',
@@ -2485,3 +2490,4 @@ def log_plan_mismatch(user_id, provider, mismatch_details):
     except Exception as e:
         print(f'❌ Failed to log plan mismatch: {str(e)}')
         return None
+
