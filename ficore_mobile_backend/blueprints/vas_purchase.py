@@ -27,7 +27,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     MONNIFY_API_KEY = os.environ.get('MONNIFY_API_KEY', '')
     MONNIFY_SECRET_KEY = os.environ.get('MONNIFY_SECRET_KEY', '')
     MONNIFY_CONTRACT_CODE = os.environ.get('MONNIFY_CONTRACT_CODE', '')
-    MONNIFY_BASE_URL = os.environ.get('MONNIFY_BASE_URL', 'https://sandbox.monnify.com')
+    MONNIFY_BASE_URL = os.environ.get('MONNIFY_BASE_URL', 'https://api.monnify.com')
     
     # Monnify Bills API specific
     MONNIFY_BILLS_BASE_URL = f"{MONNIFY_BASE_URL}/api/v1/vas/bills-payment"
@@ -38,6 +38,13 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     VAS_TRANSACTION_FEE = 30.0
     
     # ==================== HELPER FUNCTIONS ====================
+    
+    def normalize_monnify_network(network):
+        """Normalize network for Monnify by removing suffixes like '_data'"""
+        network_lower = network.lower()
+        if '_data' in network_lower or '_gifting' in network_lower or '_sme' in network_lower:
+            return network_lower.split('_')[0].upper()  # e.g., 'airtel_data' -> 'AIRTEL'
+        return network.upper()
     
     def get_monnify_access_token():
         """Get Monnify access token for Bills API"""
@@ -150,7 +157,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 '9MOBILE': '9MOBILE'
             }
             
-            monnify_network = network_mapping.get(network.upper())
+            monnify_network = network_mapping.get(normalize_monnify_network(network))
             if not monnify_network:
                 raise Exception(f'Unsupported network for Monnify: {network}')
             
@@ -210,7 +217,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'productCode': airtime_product['code'],
                 'customerId': phone_number,
                 'amount': int(amount),
-                'emailAddress': 'customer@ficoreafrica.com'  # Default email
+                'vendReference': request_id  # ADD THIS - required for vending
             }
             
             # Check if validation reference is required
@@ -224,6 +231,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             print(f'INFO: Monnify vend payload: {vend_data}')
             
             # Step 7: Execute vend (purchase)
+            print(f'INFO: Executing Monnify vend for airtime: {network} ₦{amount}')
             vend_response = call_monnify_bills_api(
                 'vend',
                 'POST', 
@@ -231,6 +239,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
+            print(f'INFO: Monnify vend response: {vend_response}')
             vend_result = vend_response['responseBody']
             
             if vend_result.get('vendStatus') == 'SUCCESS':
@@ -293,7 +302,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 '9MOBILE': '9MOBILE'
             }
             
-            monnify_network = network_mapping.get(network.upper())
+            monnify_network = network_mapping.get(normalize_monnify_network(network))
             if not monnify_network:
                 raise Exception(f'Unsupported network for Monnify: {network}')
             
@@ -323,22 +332,12 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             # Find matching data product by plan code or name
             data_product = None
             for product in products_response['responseBody']['content']:
-                # Try to match by code first, then by name patterns
-                if (product['code'] == data_plan_code or 
-                    data_plan_code in product.get('name', '') or
-                    any(keyword in product.get('name', '').lower() for keyword in ['data', 'gb', 'mb'])):
+                if product['code'] == data_plan_code:  # Strict code match only
                     data_product = product
                     break
             
             if not data_product:
-                # Use first available data product as fallback
-                data_products = [p for p in products_response['responseBody']['content'] 
-                               if 'data' in p.get('name', '').lower()]
-                if data_products:
-                    data_product = data_products[0]
-                    print(f'WARNING: Using fallback data product: {data_product["name"]}')
-                else:
-                    raise Exception(f'No data products found for {network}')
+                raise Exception(f'Monnify data product not found for plan code: {data_plan_code}')
             
             print(f'INFO: Using Monnify data product: {data_product["name"]} (Code: {data_product["code"]})')
             
@@ -366,7 +365,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'productCode': data_product['code'],
                 'customerId': phone_number,
                 'amount': vend_amount,
-                'emailAddress': 'customer@ficoreafrica.com'
+                'vendReference': request_id  # ADD THIS - required for vending
             }
             
             # Check validation reference requirement
@@ -380,6 +379,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             print(f'INFO: Monnify data vend payload: {vend_data}')
             
             # Step 7: Execute vend
+            print(f'INFO: Executing Monnify vend for data: {network} {data_plan_code}')
             vend_response = call_monnify_bills_api(
                 'vend',
                 'POST',
@@ -387,6 +387,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
+            print(f'INFO: Monnify data vend response: {vend_response}')
             vend_result = vend_response['responseBody']
             
             if vend_result.get('vendStatus') == 'SUCCESS':
@@ -936,8 +937,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 # Transform Monnify billers to our format
                 networks = []
                 for biller in billers_response['responseBody']['content']:
+                    # Use normalized network name for consistent ID format
+                    normalized_name = normalize_monnify_network(biller['name'])
                     networks.append({
-                        'id': biller['name'].lower().replace(' ', '_'),
+                        'id': normalized_name.lower().replace(' ', '_'),
                         'name': biller['name'],
                         'code': biller['code'],
                         'source': 'monnify'
@@ -1087,7 +1090,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     '9mobile': '9MOBILE'
                 }
                 
-                monnify_network = network_mapping.get(network.lower())
+                monnify_network = network_mapping.get(normalize_monnify_network(network))
                 if not monnify_network:
                     raise Exception(f'Network {network} not supported by Monnify')
                 
