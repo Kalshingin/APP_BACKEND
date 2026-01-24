@@ -1485,7 +1485,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             })
             
             # Update transaction to SUCCESS
-            mongo.db.vas_transactions.update_one(
+            update_result = mongo.db.vas_transactions.update_one(
                 {'_id': transaction_id},
                 {
                     '$set': {
@@ -1499,6 +1499,29 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     }
                 }
             )
+            
+            # CRITICAL: Verify transaction was actually updated
+            if update_result.modified_count == 0:
+                print(f'ERROR: Failed to update transaction {transaction_id} to SUCCESS')
+                print(f'       Transaction ID type: {type(transaction_id)}')
+                print(f'       Transaction ID value: {transaction_id}')
+                
+                # Try to find the transaction to debug
+                debug_txn = mongo.db.vas_transactions.find_one({'_id': transaction_id})
+                if debug_txn:
+                    print(f'       Found transaction with status: {debug_txn.get("status")}')
+                else:
+                    print(f'       Transaction not found in database!')
+            else:
+                print(f'SUCCESS: Transaction {transaction_id} updated to SUCCESS status')
+                
+                # Double-check the update worked
+                verify_txn = mongo.db.vas_transactions.find_one({'_id': transaction_id})
+                if verify_txn and verify_txn.get('status') == 'SUCCESS':
+                    print(f'VERIFIED: Transaction {transaction_id} status is SUCCESS')
+                else:
+                    print(f'WARNING: Transaction {transaction_id} status verification failed')
+                    print(f'         Current status: {verify_txn.get("status") if verify_txn else "NOT_FOUND"}')
             
             # Record corporate revenue (margin earned)
             if margin > 0:
@@ -1900,7 +1923,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             })
             
             # Update transaction to SUCCESS
-            mongo.db.vas_transactions.update_one(
+            update_result = mongo.db.vas_transactions.update_one(
                 {'_id': transaction_id},
                 {
                     '$set': {
@@ -1914,6 +1937,29 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     }
                 }
             )
+            
+            # CRITICAL: Verify transaction was actually updated
+            if update_result.modified_count == 0:
+                print(f'ERROR: Failed to update data transaction {transaction_id} to SUCCESS')
+                print(f'       Transaction ID type: {type(transaction_id)}')
+                print(f'       Transaction ID value: {transaction_id}')
+                
+                # Try to find the transaction to debug
+                debug_txn = mongo.db.vas_transactions.find_one({'_id': transaction_id})
+                if debug_txn:
+                    print(f'       Found transaction with status: {debug_txn.get("status")}')
+                else:
+                    print(f'       Transaction not found in database!')
+            else:
+                print(f'SUCCESS: Data transaction {transaction_id} updated to SUCCESS status')
+                
+                # Double-check the update worked
+                verify_txn = mongo.db.vas_transactions.find_one({'_id': transaction_id})
+                if verify_txn and verify_txn.get('status') == 'SUCCESS':
+                    print(f'VERIFIED: Data transaction {transaction_id} status is SUCCESS')
+                else:
+                    print(f'WARNING: Data transaction {transaction_id} status verification failed')
+                    print(f'         Current status: {verify_txn.get("status") if verify_txn else "NOT_FOUND"}')
             
             # NO CORPORATE REVENUE RECORDING - Data plans sold at cost with no margin
             

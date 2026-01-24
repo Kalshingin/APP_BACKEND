@@ -669,10 +669,34 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 update_operation['$set']['failureReason'] = failure_reason
             
             # Update the transaction record
-            mongo.db.vas_transactions.update_one(
+            update_result = mongo.db.vas_transactions.update_one(
                 {'_id': transaction_id},
                 update_operation
             )
+            
+            # CRITICAL: Verify transaction was actually updated
+            if update_result.modified_count == 0:
+                print(f'ERROR: Failed to update bills transaction {transaction_id} to {final_status}')
+                print(f'       Transaction ID type: {type(transaction_id)}')
+                print(f'       Transaction ID value: {transaction_id}')
+                
+                # Try to find the transaction to debug
+                debug_txn = mongo.db.vas_transactions.find_one({'_id': transaction_id})
+                if debug_txn:
+                    print(f'       Found transaction with status: {debug_txn.get("status")}')
+                else:
+                    print(f'       Transaction not found in database!')
+            else:
+                print(f'SUCCESS: Bills transaction {transaction_id} updated to {final_status} status')
+                
+                # Double-check the update worked for SUCCESS transactions
+                if final_status == 'SUCCESS':
+                    verify_txn = mongo.db.vas_transactions.find_one({'_id': transaction_id})
+                    if verify_txn and verify_txn.get('status') == 'SUCCESS':
+                        print(f'VERIFIED: Bills transaction {transaction_id} status is SUCCESS')
+                    else:
+                        print(f'WARNING: Bills transaction {transaction_id} status verification failed')
+                        print(f'         Current status: {verify_txn.get("status") if verify_txn else "NOT_FOUND"}')
             
             print(f'INFO: Updated transaction {transaction_id} to {final_status}')
             
