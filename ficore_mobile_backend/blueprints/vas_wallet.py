@@ -18,6 +18,25 @@ import threading
 import queue
 import json
 import hashlib
+import sys
+
+# Force immediate output flushing for print statements in production
+def debug_print(message):
+    """Print with immediate flush for production debugging"""
+    print(message)
+    sys.stdout.flush()
+
+# VAS Debug logging function
+def vas_log(message):
+    """VAS-specific logging that works in production"""
+    debug_print(f"VAS_DEBUG: {message}")
+    # Also try app logger if available
+    try:
+        from flask import current_app
+        if current_app:
+            current_app.logger.info(f"VAS_DEBUG: {message}")
+    except:
+        pass
 import uuid
 import json
 import pymongo
@@ -362,7 +381,7 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
         """Server-Sent Events stream for real-time balance updates"""
         try:
             user_id = str(current_user['_id'])
-            print(f'VAS_TEST: Balance stream called for user {user_id}')
+            vas_log(f'Balance stream called for user {user_id}')
             
             # Clean up any stale connections first
             cleanup_stale_connections()

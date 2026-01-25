@@ -15,9 +15,28 @@ import requests
 import uuid
 import json
 import time
+import sys
 from utils.dynamic_pricing_engine import get_pricing_engine, calculate_vas_price
 from utils.emergency_pricing_recovery import tag_emergency_transaction
 from blueprints.notifications import create_user_notification
+
+# Force immediate output flushing for print statements in production
+def debug_print(message):
+    """Print with immediate flush for production debugging"""
+    print(message)
+    sys.stdout.flush()
+
+# VAS Debug logging function
+def vas_log(message):
+    """VAS-specific logging that works in production"""
+    debug_print(f"VAS_DEBUG: {message}")
+    # Also try app logger if available
+    try:
+        from flask import current_app
+        if current_app:
+            current_app.logger.info(f"VAS_DEBUG: {message}")
+    except:
+        pass
 from blueprints.vas_wallet import push_balance_update
 from utils.monnify_utils import call_monnify_auth, call_monnify_bills_api
 
@@ -354,10 +373,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             all_product_codes = [p['code'] for p in all_products]
             print(f"DEBUG: Searching for Plan Code '{data_plan_code}' in Monnify List: {all_product_codes}")
             print(f'DEBUG: All available data products for {monnify_network}:')
-            for product in all_products[:10]:  # Show first 10 to avoid spam
+            for i, product in enumerate(all_products):
                 print(f'  - Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
-            if len(all_products) > 10:
-                print(f'  ... and {len(all_products) - 10} more products')
+            print(f'TOTAL: {len(all_products)} products available')
             
             # Find matching data product by plan code with translation support
             data_product = None
@@ -1087,8 +1105,8 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     def get_data_networks(current_user):
         """Get available data networks from Monnify Bills API (primary) with Peyflex fallback"""
         try:
-            print('INFO: Fetching data networks from Monnify Bills API')
-            print(f'INFO: Route /api/vas/purchase/networks/data was called by user {current_user.get("_id", "unknown")}')
+            vas_log('Fetching data networks from Monnify Bills API')
+            vas_log(f'Route /api/vas/purchase/networks/data was called by user {current_user.get("_id", "unknown")}')
             
             # Try Monnify first
             try:
@@ -1241,8 +1259,8 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     def get_data_plans(current_user, network):
         """Get data plans for a specific network from Monnify Bills API (primary) with Peyflex fallback"""
         try:
-            print(f'INFO: Fetching data plans for network: {network}')
-            print(f'INFO: Route /api/vas/purchase/data-plans/{network} was called by user {current_user.get("_id", "unknown")}')
+            vas_log(f'Fetching data plans for network: {network}')
+            vas_log(f'Route /api/vas/purchase/data-plans/{network} was called by user {current_user.get("_id", "unknown")}')
             
             # Try Monnify first
             try:
@@ -1293,9 +1311,30 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 
                 # Transform Monnify products to our format
                 plans = []
-                for product in products_response['responseBody']['content']:
-                    # Filter for data products
-                    if 'data' in product.get('name', '').lower() or 'gb' in product.get('name', '').lower() or 'mb' in product.get('name', '').lower():
+                all_products = products_response['responseBody']['content']
+                
+                vas_log(f'Processing {len(all_products)} Monnify products for {network}')
+                
+                for product in all_products:
+                    product_name = product.get('name', '').lower()
+                    
+                    # Filter for data products (be more inclusive)
+                    is_data_product = (
+                        'data' in product_name or 
+                        'gb' in product_name or 
+                        'mb' in product_name or
+                        'bundle' in product_name
+                    )
+                    
+                    # Exclude obvious non-data products
+                    is_excluded = (
+                        'top up' in product_name or
+                        'topup' in product_name or
+                        'airtime' in product_name or
+                        'recharge' in product_name
+                    )
+                    
+                    if is_data_product and not is_excluded:
                         plan = {
                             'id': product['code'],
                             'name': product['name'],
@@ -1315,6 +1354,11 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                             plan['durationUnit'] = metadata.get('durationUnit', 'MONTHLY')
                         
                         plans.append(plan)
+                        vas_log(f'✅ Added Monnify plan: {product["code"]} - {product["name"]} - ₦{product.get("price", 0)}')
+                    else:
+                        vas_log(f'❌ Skipped: {product["code"]} - {product["name"]} (not data product)')
+                
+                vas_log(f'Final result: {len(plans)} Monnify data plans for {network}')
                 
                 if plans:
                     print(f'SUCCESS: Successfully retrieved {len(plans)} data plans from Monnify for {network}')
@@ -1329,10 +1373,10 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     raise Exception(f'No data plans found for {network} on Monnify')
                 
             except Exception as monnify_error:
-                print(f'WARNING: Monnify data plans failed for {network}: {str(monnify_error)}')
+                vas_log(f'WARNING: Monnify data plans failed for {network}: {str(monnify_error)}')
                 
                 # Fallback to Peyflex
-                print(f'INFO: Falling back to Peyflex for {network} data plans')
+                vas_log(f'Falling back to Peyflex for {network} data plans')
                 
                 # Validate network ID format - Peyflex uses specific network identifiers
                 network_lower = network.lower().strip()
