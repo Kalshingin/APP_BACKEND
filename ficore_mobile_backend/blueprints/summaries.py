@@ -206,6 +206,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 except Exception as e:
                     # DISABLED FOR LIQUID WALLET FOCUS
                     # print(f"Error fetching VAS transactions: {e}")
+                    pass
 
             if activity_type in ['all', 'expense']:
                 try:
@@ -238,6 +239,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 except Exception as e:
                     # DISABLED FOR LIQUID WALLET FOCUS
                     # print(f"Error fetching expenses: {e}")
+                    pass
 
             if activity_type in ['all', 'income']:
                 try:
@@ -270,6 +272,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 except Exception as e:
                     # DISABLED FOR LIQUID WALLET FOCUS
                     # print(f"Error fetching incomes: {e}")
+                    pass
 
             # Sort all activities by date (most recent first)
             activities.sort(key=lambda x: x['date'], reverse=True)
@@ -344,6 +347,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             except Exception as e:
                 # DISABLED FOR LIQUID WALLET FOCUS
                 # print(f"Error fetching user balance: {e}")
+                pass
             
             # Get ALL income data with proper aggregation
             try:
@@ -417,6 +421,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             except Exception as e:
                 # DISABLED FOR LIQUID WALLET FOCUS
                 # print(f"Error fetching incomes: {e}")
+                pass
             
             # CRITICAL FIX: Get ALL expense data with optimized single aggregation pipeline
             try:
@@ -736,6 +741,7 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             except Exception as e:
                 # DISABLED FOR LIQUID WALLET FOCUS
                 # print(f"Error counting recent activities: {e}")
+                pass
 
             # DISABLED FOR LIQUID WALLET FOCUS
             # print(f"DEBUG FINAL SUMMARY DATA: {summary_data}")
