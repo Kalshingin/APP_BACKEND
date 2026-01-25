@@ -2840,35 +2840,3 @@ def test_product_integrity_system():
     except Exception as e:
         print(f'❌ Product integrity test failed: {str(e)}')
         return False
-
-# Add a test endpoint for development
-@vas_purchase_bp.route('/test/product-integrity', methods=['GET'])
-@token_required
-def test_product_integrity_endpoint(current_user):
-    """Test endpoint for product integrity system (development only)"""
-    try:
-        # Only allow admin users to run tests
-        if not current_user.get('isAdmin', False):
-            return jsonify({
-                'success': False,
-                'message': 'Admin access required'
-            }), 403
-        
-        test_result = test_product_integrity_system()
-        
-        return jsonify({
-            'success': test_result,
-            'message': 'Product integrity test completed',
-            'data': {
-                'test_passed': test_result,
-                'timestamp': datetime.utcnow().isoformat() + 'Z'
-            }
-        }), 200
-        
-    except Exception as e:
-        print(f'ERROR: Product integrity test endpoint failed: {str(e)}')
-        return jsonify({
-            'success': False,
-            'message': 'Test failed',
-            'errors': {'general': [str(e)]}
-        }), 500
