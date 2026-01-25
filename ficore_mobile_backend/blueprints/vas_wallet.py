@@ -416,11 +416,29 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                 """Generate SSE events for balance updates"""
                 connection_active = True
                 heartbeat_count = 0
-                max_heartbeats = 10  # REDUCED: 5 minutes max connection (30s * 10 = 300s) to prevent worker timeout
+                max_heartbeats = 60  # INCREASED: 15 minutes max connection (15s * 60 = 900s) for better UX
                 
                 try:
                     # Send initial connection confirmation
                     yield f"data: {json.dumps({'type': 'connected', 'user_id': user_id, 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                    
+                    # 🚀 CRITICAL FIX: Send current balance immediately upon connection
+                    try:
+                        wallet = mongo.db.vas_wallets.find_one({'userId': ObjectId(user_id)})
+                        if wallet:
+                            current_balance = wallet.get('balance', 0.0)
+                            initial_balance_update = {
+                                'type': 'balance_update',
+                                'new_balance': current_balance,
+                                'timestamp': datetime.utcnow().isoformat(),
+                                'source': 'initial_connection'
+                            }
+                            yield f"data: {json.dumps(initial_balance_update)}\n\n"
+                            print(f'🚀 SSE: Initial balance sent for user {user_id}: ₦{current_balance:,.2f}')
+                        else:
+                            print(f'WARNING: No wallet found for user {user_id}')
+                    except Exception as e:
+                        print(f'WARNING: Failed to send initial balance: {str(e)}')
                     
                     while connection_active and heartbeat_count < max_heartbeats:
                         try:
@@ -429,12 +447,12 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                                 connection_active = False
                                 break
                                 
-                            # REDUCED: Wait for balance update events (15 second timeout instead of 30)
-                            update = user_queue.get(timeout=15)
+                            # REDUCED: Wait for balance update events (5 second timeout for faster response)
+                            update = user_queue.get(timeout=5)
                             yield f"data: {json.dumps(update)}\n\n"
                             
                         except queue.Empty:
-                            # Send heartbeat every 15 seconds to keep connection alive
+                            # Send heartbeat every 5 seconds to keep connection alive
                             heartbeat_count += 1
                             heartbeat = {
                                 'type': 'heartbeat',
