@@ -9,7 +9,7 @@ backlog = 2048
 
 # Worker processes
 workers = int(os.environ.get('WEB_CONCURRENCY', '2'))
-worker_class = 'eventlet'  # Async worker for SSE streams (more stable than gevent)
+worker_class = 'sync'  # Use sync workers (most stable)
 worker_connections = 1000
 max_requests = 1000
 max_requests_jitter = 50
