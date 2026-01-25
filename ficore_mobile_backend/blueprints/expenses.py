@@ -440,16 +440,18 @@ def get_expense_summary():
             all_expenses = list(expenses_bp.mongo.db.expenses.find(base_query))
             
             # CRITICAL DEBUG: Log expense summary calculation
-            print(f"DEBUG EXPENSE SUMMARY - User: {current_user['_id']}")
-            print(f"DEBUG: Total expenses retrieved: {len(all_expenses)}")
+            # DISABLED FOR VAS FOCUS
+            # print(f"DEBUG EXPENSE SUMMARY - User: {current_user['_id']}")
+            # print(f"DEBUG: Total expenses retrieved: {len(all_expenses)}")
             
             filtered_expenses = [exp for exp in all_expenses if exp.get('date') and filter_start <= exp['date'] <= filter_end]
            
             total_this_month = sum(exp.get('amount', 0) for exp in all_expenses if exp.get('date') and exp['date'] >= start_of_month)
             total_last_month = sum(exp.get('amount', 0) for exp in all_expenses if exp.get('date') and start_of_last_month <= exp['date'] < start_of_month)
             
-            print(f"DEBUG EXPENSE SUMMARY: This month total: {total_this_month}")
-            print(f"DEBUG EXPENSE SUMMARY: Last month total: {total_last_month}")
+            # DISABLED FOR VAS FOCUS
+            # print(f"DEBUG EXPENSE SUMMARY: This month total: {total_this_month}")
+            # print(f"DEBUG EXPENSE SUMMARY: Last month total: {total_last_month}")
            
             category_totals = {}
             for expense in filtered_expenses:
@@ -625,8 +627,9 @@ def get_expense_insights():
             expenses = list(expenses_bp.mongo.db.expenses.find(base_query))
             
             # CRITICAL DEBUG: Log insights calculation
-            print(f"DEBUG EXPENSE INSIGHTS - User: {current_user['_id']}")
-            print(f"DEBUG: Total expenses retrieved: {len(expenses)}")
+            # DISABLED FOR VAS FOCUS
+            # print(f"DEBUG EXPENSE INSIGHTS - User: {current_user['_id']}")
+            # print(f"DEBUG: Total expenses retrieved: {len(expenses)}")
             
             if not expenses:
                 return jsonify({
@@ -645,16 +648,18 @@ def get_expense_insights():
             current_total = sum(e.get('amount', 0) for e in current_month_expenses)
             last_total = sum(e.get('amount', 0) for e in last_month_expenses)
             
-            print(f"DEBUG EXPENSE INSIGHTS: This month expenses count: {len(current_month_expenses)}")
-            print(f"DEBUG EXPENSE INSIGHTS: This month total: {current_total}")
-            print(f"DEBUG EXPENSE INSIGHTS: Last month expenses count: {len(last_month_expenses)}")
-            print(f"DEBUG EXPENSE INSIGHTS: Last month total: {last_total}")
+            # DISABLED FOR VAS FOCUS
+            # print(f"DEBUG EXPENSE INSIGHTS: This month expenses count: {len(current_month_expenses)}")
+            # print(f"DEBUG EXPENSE INSIGHTS: This month total: {current_total}")
+            # print(f"DEBUG EXPENSE INSIGHTS: Last month expenses count: {len(last_month_expenses)}")
+            # print(f"DEBUG EXPENSE INSIGHTS: Last month total: {last_total}")
            
             insights = []
             # CRITICAL FIX: Consistent calculation with proper severity field
             if last_total > 0:
                 change = ((current_total - last_total) / last_total) * 100
-                print(f"DEBUG EXPENSE INSIGHTS: Calculated change = {change}%")
+                # DISABLED FOR VAS FOCUS
+                # print(f"DEBUG EXPENSE INSIGHTS: Calculated change = {change}%")
                 
                 if change > 15:
                     insights.append({
