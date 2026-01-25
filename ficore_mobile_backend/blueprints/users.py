@@ -305,7 +305,8 @@ def change_password():
             
             return jsonify({
                 'success': True,
-                'message': 'Password changed successfully'
+                'message': 'Password changed successfully',
+                'data': None
             })
             
         except Exception as e:

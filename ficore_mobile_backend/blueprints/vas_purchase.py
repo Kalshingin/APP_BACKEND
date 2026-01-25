@@ -39,12 +39,33 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     VAS_TRANSACTION_FEE = 30.0
     
     # Centralized mapping to decouple internal names from provider names
+    # Updated to handle all frontend network ID variations
     PROVIDER_NETWORK_MAP = {
         'mtn': {
             'monnify': 'MTN',
-            'peyflex': 'mtn_sme_data'  # or mtn_sme_data based on your UI
+            'peyflex': 'mtn_sme_data'
+        },
+        'mtn_gifting': {  # Frontend sends this
+            'monnify': 'MTN',
+            'peyflex': 'mtn_gifting_data'
+        },
+        'mtn_gifting_data': {  # Frontend sends this
+            'monnify': 'MTN',
+            'peyflex': 'mtn_gifting_data'
+        },
+        'mtn_sme': {  # Frontend sends this
+            'monnify': 'MTN',
+            'peyflex': 'mtn_sme_data'
+        },
+        'mtn_sme_data': {  # Frontend sends this
+            'monnify': 'MTN',
+            'peyflex': 'mtn_sme_data'
         },
         'airtel': {
+            'monnify': 'AIRTEL',
+            'peyflex': 'airtel_data'
+        },
+        'airtel_data': {  # Frontend sends this
             'monnify': 'AIRTEL',
             'peyflex': 'airtel_data'
         },
@@ -52,7 +73,15 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             'monnify': 'GLO',
             'peyflex': 'glo_data'
         },
+        'glo_data': {  # Frontend sends this
+            'monnify': 'GLO',
+            'peyflex': 'glo_data'
+        },
         '9mobile': {
+            'monnify': '9MOBILE',
+            'peyflex': '9mobile_data'
+        },
+        '9mobile_data': {  # Frontend sends this
             'monnify': '9MOBILE',
             'peyflex': '9mobile_data'
         }
@@ -330,16 +359,39 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             if len(all_products) > 10:
                 print(f'  ... and {len(all_products) - 10} more products')
             
-            # Find matching data product by plan code (STRICT MATCH ONLY)
+            # Find matching data product by plan code with translation support
             data_product = None
+            original_plan_code = data_plan_code
+            
+            # First try exact match
             for product in all_products:
-                if product['code'] == data_plan_code:  # Strict code match only
+                if product['code'] == data_plan_code:
                     data_product = product
+                    print(f'✅ EXACT MATCH: Found plan {data_plan_code}')
                     break
             
+            # If no exact match, try with plan code translation
             if not data_product:
-                print(f"CRITICAL: Plan code {data_plan_code} not found for {monnify_network}. Available codes: {all_product_codes[:5]}...")
-                raise Exception(f'Monnify data product not found for plan code: {data_plan_code}')
+                print(f'🔄 NO EXACT MATCH: Trying plan code translation for {data_plan_code}')
+                validation_result = validate_plan_for_provider(data_plan_code, 'monnify', network_key)
+                translated_code = validation_result['translated_code']
+                
+                if translated_code != data_plan_code:
+                    print(f'🔄 TRYING TRANSLATED CODE: {translated_code}')
+                    for product in all_products:
+                        if product['code'] == translated_code:
+                            data_product = product
+                            data_plan_code = translated_code  # Use translated code for API call
+                            print(f'✅ TRANSLATION MATCH: Found plan {translated_code}')
+                            break
+            
+            if not data_product:
+                print(f"CRITICAL: Plan code {original_plan_code} not found for {monnify_network}")
+                print(f"         Tried original: {original_plan_code}")
+                if original_plan_code != data_plan_code:
+                    print(f"         Tried translated: {data_plan_code}")
+                print(f"         Available codes: {all_product_codes[:10]}...")
+                raise Exception(f'Monnify data product not found for plan code: {original_plan_code}. Available: {all_product_codes[:5]}')
             
             print(f'SUCCESS: Using Monnify data product: {data_product["name"]} (Code: {data_product["code"]})')
             
@@ -576,10 +628,19 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             peyflex_network = mapping['peyflex']
             print(f'   Mapped to Peyflex: {peyflex_network}')
             
+            # Validate and translate plan code for Peyflex
+            original_plan_code = data_plan_code
+            validation_result = validate_plan_for_provider(data_plan_code, 'peyflex', network_key)
+            translated_plan_code = validation_result['translated_code']
+            
+            if translated_plan_code != original_plan_code:
+                print(f'🔄 PLAN CODE TRANSLATED: {original_plan_code} → {translated_plan_code}')
+                data_plan_code = translated_plan_code
+            
             # Use the exact format from Peyflex documentation
             payload = {
                 'network': peyflex_network,  # Use mapped network (e.g., 'mtn_gifting_data')
-                'plan_code': data_plan_code,  # Use plan_code as shown in docs
+                'plan_code': data_plan_code,  # Use translated plan_code
                 'mobile_number': phone_number
             }
             
@@ -1188,9 +1249,16 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 # Map network to Monnify biller code
                 network_mapping = {
                     'mtn': 'MTN',
+                    'mtn_gifting': 'MTN',        # Frontend sends this
+                    'mtn_gifting_data': 'MTN',   # Frontend sends this
+                    'mtn_sme': 'MTN',            # Frontend sends this
+                    'mtn_sme_data': 'MTN',       # Frontend sends this
                     'airtel': 'AIRTEL',
+                    'airtel_data': 'AIRTEL',     # Frontend sends this
                     'glo': 'GLO',
-                    '9mobile': '9MOBILE'
+                    'glo_data': 'GLO',           # Frontend sends this
+                    '9mobile': '9MOBILE',
+                    '9mobile_data': '9MOBILE'    # Frontend sends this
                 }
                 
                 monnify_network = network_mapping.get(normalize_monnify_network(network))
@@ -1394,39 +1462,249 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         except Exception as e:
             print(f'ERROR: Error in get_data_plans: {str(e)}')
         
-        # Return emergency fallback plans
-        print(f'INFO: Using emergency fallback plans for {network}')
-        emergency_plans = _get_fallback_data_plans(network)
+        # Don't return fake emergency plans - return proper error
+        print(f'ERROR: All providers failed for network: {network}')
         return jsonify({
-                'success': True,
-                'data': emergency_plans,
-                'message': f'Emergency data plans for {network.upper()} (both providers unavailable)',
-                'emergency': True
-            }), 200
-
-    def _get_fallback_data_plans(network):
-        """Get emergency fallback data plans when all providers fail"""
-        network_upper = network.upper()
-        network_lower = network.lower()
-        return [
-            {
-                'id': f'{network_lower}_1gb',
-                'name': f'{network_upper} 1GB - 30 Days',
-                'price': 500,
-                'validity': 30,
-                'plan_code': f'{network_lower}_1gb',
-                'source': 'emergency_fallback'
-            },
-            {
-                'id': f'{network_lower}_2gb', 
-                'name': f'{network_upper} 2GB - 30 Days',
-                'price': 1000,
-                'validity': 30,
-                'plan_code': f'{network_lower}_2gb',
-                'source': 'emergency_fallback'
+            'success': False,
+            'message': f'Data plans temporarily unavailable for {network.upper()}',
+            'data': [],
+            'user_message': {
+                'title': 'Service Temporarily Unavailable',
+                'message': f'{network.upper()} data plans are temporarily unavailable. Please try again later or select a different network.',
+                'type': 'service_unavailable',
+                'retry_available': True,
+                'alternatives': ['Try a different network', 'Check back in a few minutes'],
+                'alternative_names': ['Switch Network', 'Retry Later']
             }
-        ]
+        }), 503
+
+    # ==================== PLAN CODE TRANSLATION ====================
     
+    def translate_plan_code(plan_code, from_provider, to_provider, network):
+        """
+        Translate plan codes between providers for equivalent plans
+        This ensures users get the same plan even if providers use different codes
+        """
+        try:
+            # Plan translation mappings (expanded based on common plan patterns)
+            translation_maps = {
+                'peyflex_to_monnify': {
+                    # MTN translations (common plans)
+                    'mtn_500mb_30days': 'MTN_DATA_500MB_30D',
+                    'mtn_1gb_30days': 'MTN_DATA_1GB_30D',
+                    'mtn_2gb_30days': 'MTN_DATA_2GB_30D',
+                    'mtn_3gb_30days': 'MTN_DATA_3GB_30D',
+                    'mtn_5gb_30days': 'MTN_DATA_5GB_30D',
+                    'mtn_10gb_30days': 'MTN_DATA_10GB_30D',
+                    'mtn_15gb_30days': 'MTN_DATA_15GB_30D',
+                    'mtn_20gb_30days': 'MTN_DATA_20GB_30D',
+                    # MTN weekly plans
+                    'mtn_1gb_7days': 'MTN_DATA_1GB_7D',
+                    'mtn_2gb_7days': 'MTN_DATA_2GB_7D',
+                    # MTN daily plans
+                    'mtn_200mb_1day': 'MTN_DATA_200MB_1D',
+                    'mtn_500mb_1day': 'MTN_DATA_500MB_1D',
+                    
+                    # Airtel translations (common plans)
+                    'airtel_500mb_30days': 'AIRTEL_DATA_500MB_30D',
+                    'airtel_1gb_30days': 'AIRTEL_DATA_1GB_30D',
+                    'airtel_2gb_30days': 'AIRTEL_DATA_2GB_30D',
+                    'airtel_3gb_30days': 'AIRTEL_DATA_3GB_30D',
+                    'airtel_5gb_30days': 'AIRTEL_DATA_5GB_30D',
+                    'airtel_10gb_30days': 'AIRTEL_DATA_10GB_30D',
+                    'airtel_15gb_30days': 'AIRTEL_DATA_15GB_30D',
+                    'airtel_20gb_30days': 'AIRTEL_DATA_20GB_30D',
+                    
+                    # Glo translations (common plans)
+                    'glo_500mb_30days': 'GLO_DATA_500MB_30D',
+                    'glo_1gb_30days': 'GLO_DATA_1GB_30D',
+                    'glo_2gb_30days': 'GLO_DATA_2GB_30D',
+                    'glo_3gb_30days': 'GLO_DATA_3GB_30D',
+                    'glo_5gb_30days': 'GLO_DATA_5GB_30D',
+                    'glo_10gb_30days': 'GLO_DATA_10GB_30D',
+                    
+                    # 9mobile translations (common plans)
+                    '9mobile_500mb_30days': '9MOBILE_DATA_500MB_30D',
+                    '9mobile_1gb_30days': '9MOBILE_DATA_1GB_30D',
+                    '9mobile_2gb_30days': '9MOBILE_DATA_2GB_30D',
+                    '9mobile_3gb_30days': '9MOBILE_DATA_3GB_30D',
+                    '9mobile_5gb_30days': '9MOBILE_DATA_5GB_30D',
+                },
+                'monnify_to_peyflex': {
+                    # MTN translations (reverse mapping)
+                    'MTN_DATA_500MB_30D': 'mtn_500mb_30days',
+                    'MTN_DATA_1GB_30D': 'mtn_1gb_30days',
+                    'MTN_DATA_2GB_30D': 'mtn_2gb_30days',
+                    'MTN_DATA_3GB_30D': 'mtn_3gb_30days',
+                    'MTN_DATA_5GB_30D': 'mtn_5gb_30days',
+                    'MTN_DATA_10GB_30D': 'mtn_10gb_30days',
+                    'MTN_DATA_15GB_30D': 'mtn_15gb_30days',
+                    'MTN_DATA_20GB_30D': 'mtn_20gb_30days',
+                    # MTN weekly plans
+                    'MTN_DATA_1GB_7D': 'mtn_1gb_7days',
+                    'MTN_DATA_2GB_7D': 'mtn_2gb_7days',
+                    # MTN daily plans
+                    'MTN_DATA_200MB_1D': 'mtn_200mb_1day',
+                    'MTN_DATA_500MB_1D': 'mtn_500mb_1day',
+                    
+                    # Airtel translations (reverse mapping)
+                    'AIRTEL_DATA_500MB_30D': 'airtel_500mb_30days',
+                    'AIRTEL_DATA_1GB_30D': 'airtel_1gb_30days',
+                    'AIRTEL_DATA_2GB_30D': 'airtel_2gb_30days',
+                    'AIRTEL_DATA_3GB_30D': 'airtel_3gb_30days',
+                    'AIRTEL_DATA_5GB_30D': 'airtel_5gb_30days',
+                    'AIRTEL_DATA_10GB_30D': 'airtel_10gb_30days',
+                    'AIRTEL_DATA_15GB_30D': 'airtel_15gb_30days',
+                    'AIRTEL_DATA_20GB_30D': 'airtel_20gb_30days',
+                    
+                    # Glo translations (reverse mapping)
+                    'GLO_DATA_500MB_30D': 'glo_500mb_30days',
+                    'GLO_DATA_1GB_30D': 'glo_1gb_30days',
+                    'GLO_DATA_2GB_30D': 'glo_2gb_30days',
+                    'GLO_DATA_3GB_30D': 'glo_3gb_30days',
+                    'GLO_DATA_5GB_30D': 'glo_5gb_30days',
+                    'GLO_DATA_10GB_30D': 'glo_10gb_30days',
+                    
+                    # 9mobile translations (reverse mapping)
+                    '9MOBILE_DATA_500MB_30D': '9mobile_500mb_30days',
+                    '9MOBILE_DATA_1GB_30D': '9mobile_1gb_30days',
+                    '9MOBILE_DATA_2GB_30D': '9mobile_2gb_30days',
+                    '9MOBILE_DATA_3GB_30D': '9mobile_3gb_30days',
+                    '9MOBILE_DATA_5GB_30D': '9mobile_5gb_30days',
+                }
+            }
+            
+            translation_key = f'{from_provider}_to_{to_provider}'
+            translation_map = translation_maps.get(translation_key, {})
+            
+            # First try exact match
+            translated_code = translation_map.get(plan_code)
+            
+            if translated_code:
+                print(f'🔄 EXACT PLAN CODE TRANSLATION: {plan_code} ({from_provider}) → {translated_code} ({to_provider})')
+                return translated_code
+            
+            # If no exact match, try pattern-based translation
+            pattern_translated = translate_plan_code_by_pattern(plan_code, from_provider, to_provider, network)
+            if pattern_translated != plan_code:
+                print(f'🔄 PATTERN PLAN CODE TRANSLATION: {plan_code} ({from_provider}) → {pattern_translated} ({to_provider})')
+                return pattern_translated
+            
+            print(f'⚠️ NO TRANSLATION FOUND: {plan_code} from {from_provider} to {to_provider}')
+            return plan_code  # Return original if no translation found
+                
+        except Exception as e:
+            print(f'❌ Plan code translation error: {str(e)}')
+            return plan_code  # Return original on error
+    
+    def translate_plan_code_by_pattern(plan_code, from_provider, to_provider, network):
+        """
+        Translate plan codes using pattern matching when exact mappings don't exist
+        """
+        try:
+            import re
+            
+            # Extract data amount and validity from plan code
+            plan_lower = plan_code.lower()
+            
+            # Pattern to extract data amount (500mb, 1gb, 2gb, etc.)
+            data_match = re.search(r'(\d+(?:\.\d+)?)(mb|gb)', plan_lower)
+            if not data_match:
+                return plan_code
+            
+            amount = data_match.group(1)
+            unit = data_match.group(2)
+            
+            # Pattern to extract validity (1day, 7days, 30days, etc.)
+            validity_match = re.search(r'(\d+)(?:_|-|\s)?(day|days|week|weeks|month|months)', plan_lower)
+            validity = '30days'  # Default
+            if validity_match:
+                num = validity_match.group(1)
+                period = validity_match.group(2)
+                if period in ['day', 'days']:
+                    validity = f'{num}day' if num == '1' else f'{num}days'
+                elif period in ['week', 'weeks']:
+                    days = int(num) * 7
+                    validity = f'{days}days'
+                elif period in ['month', 'months']:
+                    days = int(num) * 30
+                    validity = f'{days}days'
+            
+            # Convert validity to standard format
+            if validity == '30days':
+                validity_suffix = '30D'
+            elif validity == '7days':
+                validity_suffix = '7D'
+            elif validity == '1day':
+                validity_suffix = '1D'
+            else:
+                validity_suffix = '30D'  # Default
+            
+            # Generate target format based on provider
+            network_lower = network.lower()
+            if to_provider == 'monnify':
+                # Monnify format: MTN_DATA_1GB_30D
+                network_upper = network_lower.upper()
+                if network_upper in ['MTN_GIFTING', 'MTN_SME']:
+                    network_upper = 'MTN'
+                elif network_upper in ['AIRTEL_DATA']:
+                    network_upper = 'AIRTEL'
+                elif network_upper in ['GLO_DATA']:
+                    network_upper = 'GLO'
+                elif network_upper in ['9MOBILE_DATA']:
+                    network_upper = '9MOBILE'
+                
+                return f'{network_upper}_DATA_{amount.upper()}{unit.upper()}_{validity_suffix}'
+                
+            elif to_provider == 'peyflex':
+                # Peyflex format: mtn_1gb_30days
+                network_prefix = network_lower
+                if network_prefix in ['mtn_gifting', 'mtn_sme']:
+                    network_prefix = 'mtn'
+                elif network_prefix.endswith('_data'):
+                    network_prefix = network_prefix.replace('_data', '')
+                
+                return f'{network_prefix}_{amount}{unit}_{validity}'
+            
+            return plan_code
+            
+        except Exception as e:
+            print(f'❌ Pattern translation error: {str(e)}')
+            return plan_code
+    
+    def validate_plan_for_provider(plan_id, provider, network):
+        """
+        Validate that a plan ID is compatible with the target provider
+        Returns: {'valid': bool, 'translated_code': str, 'error': str}
+        """
+        try:
+            print(f'🔍 VALIDATING PLAN FOR PROVIDER: {plan_id} → {provider} ({network})')
+            
+            # Check if plan_id looks like it belongs to a specific provider
+            if provider == 'monnify':
+                # Monnify codes typically: MTN_DATA_1GB_30D, AIRTEL_DATA_2GB_30D
+                if plan_id.upper().startswith(('MTN_', 'AIRTEL_', 'GLO_', '9MOBILE_')):
+                    return {'valid': True, 'translated_code': plan_id, 'error': None}
+                else:
+                    # Try to translate from Peyflex format
+                    translated = translate_plan_code(plan_id, 'peyflex', 'monnify', network)
+                    return {'valid': True, 'translated_code': translated, 'error': None}
+                    
+            elif provider == 'peyflex':
+                # Peyflex codes typically: mtn_1gb_30days, airtel_2gb_30days
+                if plan_id.lower().startswith(('mtn_', 'airtel_', 'glo_', '9mobile_')):
+                    return {'valid': True, 'translated_code': plan_id, 'error': None}
+                else:
+                    # Try to translate from Monnify format
+                    translated = translate_plan_code(plan_id, 'monnify', 'peyflex', network)
+                    return {'valid': True, 'translated_code': translated, 'error': None}
+            
+            return {'valid': False, 'translated_code': plan_id, 'error': f'Unknown provider: {provider}'}
+            
+        except Exception as e:
+            print(f'❌ Plan validation error: {str(e)}')
+            return {'valid': False, 'translated_code': plan_id, 'error': str(e)}
+
     # ==================== VAS PURCHASE ENDPOINTS ====================
     
     @vas_purchase_bp.route('/buy-airtime', methods=['POST'])
@@ -2213,14 +2491,23 @@ def validate_data_plan_exists(network, plan_id, expected_amount):
         try:
             from utils.monnify_utils import call_monnify_bills_api
             access_token = call_monnify_auth()
+            
+            # Use the same network mapping as the main endpoint
             network_mapping = {
-                'MTN': 'MTN',
-                'AIRTEL': 'AIRTEL', 
-                'GLO': 'GLO',
-                '9MOBILE': '9MOBILE'
+                'mtn': 'MTN',
+                'mtn_gifting': 'MTN',        # Frontend sends this
+                'mtn_gifting_data': 'MTN',   # Frontend sends this
+                'mtn_sme': 'MTN',            # Frontend sends this
+                'mtn_sme_data': 'MTN',       # Frontend sends this
+                'airtel': 'AIRTEL',
+                'airtel_data': 'AIRTEL',     # Frontend sends this
+                'glo': 'GLO',
+                'glo_data': 'GLO',           # Frontend sends this
+                '9mobile': '9MOBILE',
+                '9mobile_data': '9MOBILE'    # Frontend sends this
             }
             
-            monnify_network = network_mapping.get(network.upper())
+            monnify_network = network_mapping.get(network.lower())
             if monnify_network:
                 # Get Monnify plans (simplified version of get_data_plans logic)
                 billers_response = call_monnify_bills_api(
@@ -2265,15 +2552,22 @@ def validate_data_plan_exists(network, plan_id, expected_amount):
                 'Content-Type': 'application/json'
             }
             
-            # Map network for Peyflex
+            # Map network for Peyflex - use same mapping as main endpoint
             network_mapping = {
-                'MTN': 'mtn_gifting_data',
-                'AIRTEL': 'airtel_data',
-                'GLO': 'glo_data',
-                '9MOBILE': '9mobile_data'
+                'mtn': 'mtn_gifting_data',
+                'mtn_gifting': 'mtn_gifting_data',    # Frontend sends this
+                'mtn_gifting_data': 'mtn_gifting_data', # Frontend sends this
+                'mtn_sme': 'mtn_sme_data',
+                'mtn_sme_data': 'mtn_sme_data',
+                'airtel': 'airtel_data',
+                'airtel_data': 'airtel_data',         # Frontend sends this
+                'glo': 'glo_data',
+                'glo_data': 'glo_data',               # Frontend sends this
+                '9mobile': '9mobile_data',
+                '9mobile_data': '9mobile_data'        # Frontend sends this
             }
             
-            peyflex_network = network_mapping.get(network.upper(), network.lower())
+            peyflex_network = network_mapping.get(network.lower(), network.lower())
             url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={peyflex_network}'
             
             response = requests.get(url, headers=headers, timeout=15)
@@ -2481,3 +2775,100 @@ def log_plan_mismatch(user_id, provider, mismatch_details):
     except Exception as e:
         print(f'❌ Failed to log plan mismatch: {str(e)}')
         return None
+
+def test_product_integrity_system():
+    """
+    Test function to verify the product integrity system works correctly
+    This should be called during development/testing to ensure all components work
+    """
+    try:
+        print('🧪 TESTING PRODUCT INTEGRITY SYSTEM')
+        print('=' * 50)
+        
+        # Test 1: Network mapping
+        print('\n1. Testing Network Mapping:')
+        test_networks = ['mtn_gifting', 'airtel_data', 'glo_data', '9mobile_data']
+        for network in test_networks:
+            mapping = PROVIDER_NETWORK_MAP.get(network.lower())
+            if mapping:
+                print(f'   ✅ {network} → Monnify: {mapping["monnify"]}, Peyflex: {mapping["peyflex"]}')
+            else:
+                print(f'   ❌ {network} → No mapping found')
+        
+        # Test 2: Plan code translation
+        print('\n2. Testing Plan Code Translation:')
+        test_plans = [
+            ('mtn_1gb_30days', 'peyflex', 'monnify', 'mtn'),
+            ('MTN_DATA_2GB_30D', 'monnify', 'peyflex', 'mtn'),
+            ('airtel_500mb_30days', 'peyflex', 'monnify', 'airtel'),
+            ('unknown_plan_code', 'peyflex', 'monnify', 'mtn')
+        ]
+        
+        for plan_code, from_provider, to_provider, network in test_plans:
+            translated = translate_plan_code(plan_code, from_provider, to_provider, network)
+            print(f'   {plan_code} ({from_provider}) → {translated} ({to_provider})')
+        
+        # Test 3: Pattern-based translation
+        print('\n3. Testing Pattern-Based Translation:')
+        test_patterns = [
+            ('custom_mtn_3gb_weekly', 'peyflex', 'monnify', 'mtn'),
+            ('CUSTOM_MTN_DATA_5GB_7D', 'monnify', 'peyflex', 'mtn'),
+            ('airtel_10gb_monthly', 'peyflex', 'monnify', 'airtel')
+        ]
+        
+        for plan_code, from_provider, to_provider, network in test_patterns:
+            translated = translate_plan_code_by_pattern(plan_code, from_provider, to_provider, network)
+            print(f'   {plan_code} ({from_provider}) → {translated} ({to_provider})')
+        
+        # Test 4: Plan validation
+        print('\n4. Testing Plan Validation:')
+        test_validations = [
+            ('mtn_1gb_30days', 'peyflex', 'mtn'),
+            ('MTN_DATA_1GB_30D', 'monnify', 'mtn'),
+            ('invalid_plan', 'peyflex', 'mtn')
+        ]
+        
+        for plan_id, provider, network in test_validations:
+            result = validate_plan_for_provider(plan_id, provider, network)
+            print(f'   {plan_id} for {provider}: Valid={result["valid"]}, Translated={result["translated_code"]}')
+        
+        print('\n✅ PRODUCT INTEGRITY SYSTEM TEST COMPLETE')
+        print('=' * 50)
+        
+        return True
+        
+    except Exception as e:
+        print(f'❌ Product integrity test failed: {str(e)}')
+        return False
+
+# Add a test endpoint for development
+@vas_purchase_bp.route('/test/product-integrity', methods=['GET'])
+@token_required
+def test_product_integrity_endpoint(current_user):
+    """Test endpoint for product integrity system (development only)"""
+    try:
+        # Only allow admin users to run tests
+        if not current_user.get('isAdmin', False):
+            return jsonify({
+                'success': False,
+                'message': 'Admin access required'
+            }), 403
+        
+        test_result = test_product_integrity_system()
+        
+        return jsonify({
+            'success': test_result,
+            'message': 'Product integrity test completed',
+            'data': {
+                'test_passed': test_result,
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f'ERROR: Product integrity test endpoint failed: {str(e)}')
+        return jsonify({
+            'success': False,
+            'message': 'Test failed',
+            'errors': {'general': [str(e)]}
+        }), 500

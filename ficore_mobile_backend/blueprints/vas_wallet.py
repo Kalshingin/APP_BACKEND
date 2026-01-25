@@ -23,10 +23,21 @@ import threading
 from utils.email_service import get_email_service
 from blueprints.notifications import create_user_notification
 
+import threading
+import queue
+import json
+import time
+from datetime import datetime
+from flask import Blueprint, request, jsonify, Response
+import os
+import requests
+from bson import ObjectId
+
 # 🚀 INSTANT BALANCE UPDATE INFRASTRUCTURE - GLOBAL
 # Global queue for real-time balance updates
 balance_update_queues = {}  # user_id -> queue
 balance_update_lock = threading.Lock()
+active_connections = {}  # user_id -> connection_info
 
 def get_user_balance_queue(user_id):
     """Get or create balance update queue for user"""
@@ -48,6 +59,15 @@ def cleanup_user_balance_queue(user_id):
             # Remove the queue
             del balance_update_queues[user_id]
             print(f'INFO: Cleaned up balance queue for user {user_id}')
+        
+        # Remove from active connections
+        if user_id in active_connections:
+            del active_connections[user_id]
+
+def is_connection_active(user_id):
+    """Check if user has an active SSE connection"""
+    with balance_update_lock:
+        return user_id in active_connections and active_connections[user_id].get('active', False)
 
 def push_balance_update(user_id, update_data):
     """Push balance update to user's SSE stream - GLOBAL FUNCTION"""
@@ -319,13 +339,29 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
         """Server-Sent Events stream for real-time balance updates"""
         try:
             user_id = str(current_user['_id'])
+            
+            # Check if user already has an active connection
+            if is_connection_active(user_id):
+                return jsonify({
+                    'success': False,
+                    'message': 'User already has an active SSE connection',
+                    'errors': {'connection': ['Only one SSE connection allowed per user']}
+                }), 409
+            
             user_queue = get_user_balance_queue(user_id)
+            
+            # Mark connection as active
+            with balance_update_lock:
+                active_connections[user_id] = {
+                    'active': True,
+                    'start_time': time.time()
+                }
             
             def event_stream():
                 """Generate SSE events for balance updates"""
                 connection_active = True
                 heartbeat_count = 0
-                max_heartbeats = 120  # 1 hour max connection (30s * 120 = 3600s)
+                max_heartbeats = 60  # 30 minutes max connection (30s * 60 = 1800s)
                 
                 try:
                     # Send initial connection confirmation
@@ -333,6 +369,11 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                     
                     while connection_active and heartbeat_count < max_heartbeats:
                         try:
+                            # Check if connection should still be active
+                            if not is_connection_active(user_id):
+                                connection_active = False
+                                break
+                                
                             # Wait for balance update events (30 second timeout)
                             update = user_queue.get(timeout=30)
                             yield f"data: {json.dumps(update)}\n\n"
@@ -343,7 +384,8 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                             heartbeat = {
                                 'type': 'heartbeat',
                                 'timestamp': datetime.utcnow().isoformat(),
-                                'count': heartbeat_count
+                                'count': heartbeat_count,
+                                'max_heartbeats': max_heartbeats
                             }
                             yield f"data: {json.dumps(heartbeat)}\n\n"
                             

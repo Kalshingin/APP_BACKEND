@@ -10,6 +10,12 @@ backlog = 2048
 
 print(f"🚀 Gunicorn binding to: {bind}")
 print(f"🔧 PORT environment variable: {port}")
+print(f"🔍 All environment variables with 'PORT': {[(k, v) for k, v in os.environ.items() if 'PORT' in k.upper()]}")
+
+# Force bind to the correct port
+if port != '5000':
+    print(f"⚠️  Render assigned port {port} instead of 5000")
+    print(f"✅ Adapting to use port {port}")
 
 # Worker processes
 workers = int(os.environ.get('WEB_CONCURRENCY', '2'))
@@ -46,8 +52,16 @@ limit_request_field_size = 8190
 # certfile = '/path/to/certfile'
 
 def when_ready(server):
+    actual_port = server.address[1] if isinstance(server.address, tuple) else server.address
     server.log.info("🚀 FiCore Backend server is ready. Listening on %s", server.address)
     print(f"✅ Server ready on {server.address}")
+    print(f"🎯 Actual listening port: {actual_port}")
+    
+    # Log port mismatch if any
+    expected_port = os.environ.get('PORT', '5000')
+    if str(actual_port) != expected_port:
+        print(f"⚠️  Port mismatch: Expected {expected_port}, Actually listening on {actual_port}")
+        print(f"🔧 This is normal if Render auto-assigns ports")
 
 def worker_int(worker):
     worker.log.info("Worker received INT or QUIT signal")
