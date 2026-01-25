@@ -279,7 +279,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     'provider': 'monnify',
                     'vendAmount': vend_result.get('vendAmount', amount),
                     'payableAmount': vend_result.get('payableAmount', amount),
-                    'commission': vend_result.get('commission', 0)
+                    'commission': vend_result.get('commission', 0),
+                    # Include productName for consistency with data plans
+                    'productName': vend_result.get('productName', f'₦{amount} {network.upper()} Airtime')
                 }
             elif vend_result.get('vendStatus') == 'IN_PROGRESS':
                 # Poll for status
@@ -304,7 +306,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                         'provider': 'monnify',
                         'vendAmount': final_result.get('vendAmount', amount),
                         'payableAmount': final_result.get('payableAmount', amount),
-                        'commission': final_result.get('commission', 0)
+                        'commission': final_result.get('commission', 0),
+                        # Include productName for consistency with data plans
+                        'productName': final_result.get('productName', f'₦{amount} {network.upper()} Airtime')
                     }
                 else:
                     print(f'❌ ERROR: Monnify transaction failed after requery: {final_result.get("description", "Unknown error")}')
@@ -2966,8 +2970,13 @@ def validate_delivered_plan(api_response, requested_plan_id, requested_plan_name
         
         # Handle Monnify response format
         if isinstance(api_response, dict):
-            if 'description' in api_response:
+            # CRITICAL FIX: Use productName instead of description for plan validation
+            if 'productName' in api_response:
+                delivered_plan_name = api_response['productName']
+            elif 'description' in api_response:
+                # Fallback to description only if productName is not available
                 delivered_plan_name = api_response['description']
+            
             if 'vendAmount' in api_response:
                 delivered_amount = float(api_response.get('vendAmount', 0))
             elif 'payableAmount' in api_response:
@@ -2984,6 +2993,11 @@ def validate_delivered_plan(api_response, requested_plan_id, requested_plan_name
         
         # Check if plan names contain similar keywords
         name_similarity = check_plan_name_similarity(requested_plan_name, delivered_plan_name)
+        
+        # CRITICAL FIX: If we get a generic success message, but amounts match exactly, consider it valid
+        if delivered_plan_name in ['Okay, purchase was successfully created.', 'Transaction successful', 'Success'] and amount_difference == 0:
+            print(f'INFO: Generic success message detected with exact amount match - considering valid')
+            name_similarity = True
         
         matches = amounts_match and name_similarity
         
@@ -3043,7 +3057,14 @@ def log_plan_mismatch(user_id, provider, mismatch_details):
     try:
         from datetime import datetime
         from bson import ObjectId
-        from utils.notification_utils import create_user_notification
+        
+        # Optional notification import - don't fail if not available
+        try:
+            from utils.notification_utils import create_user_notification
+            notification_available = True
+        except ImportError:
+            print('INFO: notification_utils not available - skipping notification')
+            notification_available = False
         
         mismatch_log = {
             '_id': ObjectId(),
@@ -3071,22 +3092,29 @@ def log_plan_mismatch(user_id, provider, mismatch_details):
         print(f'   Provider: {provider}')
         print(f'   Impact: {mismatch_details}')
         
-        # Create user notification about the issue
-        create_user_notification(
-            mongo=mongo.db,
-            user_id=user_id,
-            category='system',
-            title='⚠️ Data Plan Issue Detected',
-            body=f'We detected an issue with your recent data purchase. Our team is investigating and will resolve any discrepancies within 24 hours.',
-            related_id=mismatch_details.get('transaction_id'),
-            metadata={
-                'mismatch_log_id': str(mismatch_log['_id']),
-                'provider': provider,
-                'investigation_required': True,
-                'auto_refund_eligible': True
-            },
-            priority='high'
-        )
+        # Create user notification about the issue (if notification system is available)
+        if notification_available:
+            try:
+                create_user_notification(
+                    mongo=mongo.db,
+                    user_id=user_id,
+                    category='system',
+                    title='⚠️ Data Plan Issue Detected',
+                    body=f'We detected an issue with your recent data purchase. Our team is investigating and will resolve any discrepancies within 24 hours.',
+                    related_id=mismatch_details.get('transaction_id'),
+                    metadata={
+                        'mismatch_log_id': str(mismatch_log['_id']),
+                        'provider': provider,
+                        'investigation_required': True,
+                        'auto_refund_eligible': True
+                    },
+                    priority='high'
+                )
+                print(f'📱 User notification created for plan mismatch')
+            except Exception as notif_error:
+                print(f'WARNING: Failed to create user notification: {notif_error}')
+        else:
+            print(f'INFO: Notification system not available - mismatch logged only')
         
         return str(mismatch_log['_id'])
         

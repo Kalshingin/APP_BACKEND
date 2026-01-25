@@ -1945,6 +1945,25 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
             
             print(f'INFO: Monnify webhook - EventType: {event_type}, Status: {payment_status}, Completed: {completed}')
             
+            # Handle ACCOUNT_ACTIVITY events (balance notifications)
+            if event_type == 'ACCOUNT_ACTIVITY':
+                activity_data = data.get('eventData', {})
+                activity_type = activity_data.get('activityType', '')
+                amount = activity_data.get('amount', 0)
+                narration = activity_data.get('narration', '')
+                
+                print(f'INFO: Account activity - Type: {activity_type}, Amount: ₦{amount}, Narration: {narration}')
+                
+                # These are just balance notifications, not payment confirmations
+                if 'COMMISSION' in narration.upper():
+                    print(f'INFO: Commission notification received: ₦{amount}')
+                elif 'SUCCESSFUL PAYMENT' in narration.upper() or 'PAYMENT' in narration.upper():
+                    print(f'INFO: Payment notification received: ₦{amount}')
+                else:
+                    print(f'INFO: General account activity: {narration}')
+                
+                return jsonify({'success': True, 'message': 'Account activity acknowledged'}), 200
+            
             # Process if it's a successful transaction (either format)
             should_process = (
                 (event_type == 'SUCCESSFUL_TRANSACTION') or 
