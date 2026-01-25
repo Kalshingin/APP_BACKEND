@@ -362,6 +362,7 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
         """Server-Sent Events stream for real-time balance updates"""
         try:
             user_id = str(current_user['_id'])
+            print(f'VAS_TEST: Balance stream called for user {user_id}')
             
             # Clean up any stale connections first
             cleanup_stale_connections()

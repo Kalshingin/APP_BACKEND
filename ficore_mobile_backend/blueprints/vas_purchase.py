@@ -1088,6 +1088,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         """Get available data networks from Monnify Bills API (primary) with Peyflex fallback"""
         try:
             print('INFO: Fetching data networks from Monnify Bills API')
+            print(f'INFO: Route /api/vas/purchase/networks/data was called by user {current_user.get("_id", "unknown")}')
             
             # Try Monnify first
             try:
@@ -1241,6 +1242,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         """Get data plans for a specific network from Monnify Bills API (primary) with Peyflex fallback"""
         try:
             print(f'INFO: Fetching data plans for network: {network}')
+            print(f'INFO: Route /api/vas/purchase/data-plans/{network} was called by user {current_user.get("_id", "unknown")}')
             
             # Try Monnify first
             try:
