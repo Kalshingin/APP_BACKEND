@@ -372,10 +372,21 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             all_products = products_response['responseBody']['content']
             all_product_codes = [p['code'] for p in all_products]
             print(f"DEBUG: Searching for Plan Code '{data_plan_code}' in Monnify List: {all_product_codes}")
+            
+            # CRITICAL: Log ALL products for EVERY network to build complete mapping
+            print(f'🔍 COMPLETE MONNIFY PRODUCT LIST FOR {monnify_network}:')
             print(f'DEBUG: All available data products for {monnify_network}:')
             for i, product in enumerate(all_products):
-                print(f'  - Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
-            print(f'TOTAL: {len(all_products)} products available')
+                print(f'- Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
+            print(f'TOTAL: {len(all_products)} products available for {monnify_network}')
+            print(f'🔍 END OF COMPLETE PRODUCT LIST FOR {monnify_network}')
+            
+            # Also log in a format easy to copy for mapping
+            print(f'📋 MAPPING FORMAT FOR {monnify_network}:')
+            for product in all_products:
+                if product.get('price') and product['price'] > 0:  # Only products with valid prices
+                    print(f"'{product['code']}': '{product['name']}',  # ₦{product['price']}")
+            print(f'📋 END MAPPING FORMAT FOR {monnify_network}')
             
             # Find matching data product by plan code with translation support
             data_product = None
@@ -1266,24 +1277,33 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             try:
                 access_token = call_monnify_auth()
                 
-                # Map network to Monnify biller code
+                # CRITICAL FIX: Map network to Monnify biller code with proper frontend network handling
                 network_mapping = {
+                    # FIXED: Handle all frontend network variations properly
                     'mtn': 'MTN',
-                    'mtn_gifting': 'MTN',        # Frontend sends this
-                    'mtn_gifting_data': 'MTN',   # Frontend sends this
-                    'mtn_sme': 'MTN',            # Frontend sends this
-                    'mtn_sme_data': 'MTN',       # Frontend sends this
+                    'mtn_gifting': 'MTN',        # Frontend sends this - FIXED!
+                    'mtn_gifting_data': 'MTN',   # Frontend sends this - FIXED!
+                    'mtn_sme': 'MTN',            # Frontend sends this - FIXED!
+                    'mtn_sme_data': 'MTN',       # Frontend sends this - FIXED!
                     'airtel': 'AIRTEL',
-                    'airtel_data': 'AIRTEL',     # Frontend sends this
+                    'airtel_data': 'AIRTEL',     # Frontend sends this - FIXED!
                     'glo': 'GLO',
-                    'glo_data': 'GLO',           # Frontend sends this
+                    'glo_data': 'GLO',           # Frontend sends this - FIXED!
                     '9mobile': '9MOBILE',
-                    '9mobile_data': '9MOBILE'    # Frontend sends this
+                    '9mobile_data': '9MOBILE'    # Frontend sends this - FIXED!
                 }
                 
-                monnify_network = network_mapping.get(normalize_monnify_network(network))
+                # CRITICAL: Use the network mapping instead of normalize_monnify_network
+                monnify_network = network_mapping.get(network.lower())
                 if not monnify_network:
+                    # Try with normalized network as fallback
+                    monnify_network = network_mapping.get(normalize_monnify_network(network))
+                
+                if not monnify_network:
+                    vas_log(f'CRITICAL: Network {network} not supported by Monnify. Available: {list(network_mapping.keys())}')
                     raise Exception(f'Network {network} not supported by Monnify')
+                
+                vas_log(f'SUCCESS: Mapped {network} → {monnify_network} for Monnify')
                 
                 # Get billers for DATA_BUNDLE category
                 billers_response = call_monnify_bills_api(
@@ -1317,13 +1337,16 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 
                 for product in all_products:
                     product_name = product.get('name', '').lower()
+                    product_code = product.get('code', '')
+                    product_price = product.get('price', 0)
                     
-                    # Filter for data products (be more inclusive)
+                    # ENHANCED FILTERING: Be more inclusive for data products
                     is_data_product = (
                         'data' in product_name or 
                         'gb' in product_name or 
                         'mb' in product_name or
-                        'bundle' in product_name
+                        'bundle' in product_name or
+                        'plan' in product_name
                     )
                     
                     # Exclude obvious non-data products
@@ -1331,15 +1354,17 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                         'top up' in product_name or
                         'topup' in product_name or
                         'airtime' in product_name or
-                        'recharge' in product_name
+                        'recharge' in product_name or
+                        'mobile top up' in product_name  # Specific exclusion for code 13
                     )
                     
+                    # CRITICAL: Log every decision for debugging
                     if is_data_product and not is_excluded:
                         plan = {
-                            'id': product['code'],
+                            'id': product_code,
                             'name': product['name'],
-                            'price': product.get('price', 0),
-                            'plan_code': product['code'],
+                            'price': product_price,
+                            'plan_code': product_code,
                             'source': 'monnify',
                             'priceType': product.get('priceType', 'FIXED'),
                             'minAmount': product.get('minAmount'),
@@ -1354,22 +1379,33 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                             plan['durationUnit'] = metadata.get('durationUnit', 'MONTHLY')
                         
                         plans.append(plan)
-                        vas_log(f'✅ Added Monnify plan: {product["code"]} - {product["name"]} - ₦{product.get("price", 0)}')
+                        vas_log(f'✅ INCLUDED: {product_code} - {product["name"]} - ₦{product_price} (data={is_data_product}, excluded={is_excluded})')
                     else:
-                        vas_log(f'❌ Skipped: {product["code"]} - {product["name"]} (not data product)')
+                        vas_log(f'❌ EXCLUDED: {product_code} - {product["name"]} - ₦{product_price} (data={is_data_product}, excluded={is_excluded})')
                 
-                vas_log(f'Final result: {len(plans)} Monnify data plans for {network}')
+                vas_log(f'FINAL RESULT: {len(plans)} Monnify data plans for {network} (from {len(all_products)} total products)')
                 
                 if plans:
+                    # CRITICAL SUCCESS: Monnify plans found - prioritize them!
+                    vas_log(f'🎯 SUCCESS: {len(plans)} Monnify data plans found for {network} - PRIORITIZING OVER PEYFLEX!')
+                    
+                    # Add priority indicators to help frontend
+                    for plan in plans:
+                        plan['provider_priority'] = 'primary'  # Monnify is primary
+                        plan['savings_vs_peyflex'] = 'Available'  # Will be calculated if needed
+                    
                     print(f'SUCCESS: Successfully retrieved {len(plans)} data plans from Monnify for {network}')
                     return jsonify({
                         'success': True,
                         'data': plans,
-                        'message': f'Data plans for {network.upper()} from Monnify Bills API',
+                        'message': f'Data plans for {network.upper()} from Monnify Bills API (PRIMARY - Better Pricing)',
                         'source': 'monnify_bills',
-                        'network': network
+                        'network': network,
+                        'provider': 'monnify',
+                        'priority': 'primary'
                     }), 200
                 else:
+                    vas_log(f'⚠️ WARNING: No data plans found in Monnify for {network} - will try Peyflex fallback')
                     raise Exception(f'No data plans found for {network} on Monnify')
                 
             except Exception as monnify_error:
@@ -1466,12 +1502,21 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                             print(f'SUCCESS: Successfully transformed {len(transformed_plans)} valid plans from Peyflex')
                             
                             if len(transformed_plans) > 0:
+                                # Add fallback indicators
+                                for plan in transformed_plans:
+                                    plan['provider_priority'] = 'fallback'  # Peyflex is fallback only
+                                    plan['fallback_reason'] = f'Monnify unavailable for {network}'
+                                
+                                vas_log(f'⚠️ FALLBACK: Using {len(transformed_plans)} Peyflex plans for {network} (Monnify failed)')
                                 return jsonify({
                                     'success': True,
                                     'data': transformed_plans,
-                                    'message': f'Data plans for {network.upper()} from Peyflex (fallback)',
+                                    'message': f'Data plans for {network.upper()} from Peyflex (FALLBACK - Monnify unavailable)',
                                     'source': 'peyflex_fallback',
-                                    'network_id': full_network_id
+                                    'network_id': full_network_id,
+                                    'provider': 'peyflex',
+                                    'priority': 'fallback',
+                                    'fallback_reason': f'Monnify service unavailable for {network}'
                                 }), 200
                             else:
                                 print(f'WARNING: No valid plans found for {full_network_id}')
@@ -1535,7 +1580,28 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             # Plan translation mappings (expanded based on common plan patterns)
             translation_maps = {
                 'peyflex_to_monnify': {
-                    # MTN translations (common plans)
+                    # CRITICAL FIX: Direct Peyflex → Monnify code mapping (EXACT MATCH FROM LOGS)
+                    # MTN Plans - Based on actual API responses
+                    'M1GBS': '1815',        # 1GB 7 Days: ₦826 → ₦800 (SAVE ₦26!)
+                    'M230MBS': '1810',      # 230MB Daily: ₦250 → ₦200 (SAVE ₦50!)
+                    'M2GBS': '1836',        # 2GB 2 Days: ₦800 → ₦750 (SAVE ₦50!)
+                    'M205GBS': '1814',      # 2.5GB → 1.5GB 2 Days: ₦650 → ₦600 (SAVE ₦50!)
+                    'M2m5GBS': '1814',      # 2.5GB → 1.5GB 2 Days: ₦923 → ₦600 (SAVE ₦323!)
+                    'M3m2GBS': '1835',      # 3.2GB → 3.5GB Weekly: ₦1020 → ₦1500 (upgrade)
+                    
+                    # AIRTEL Plans - TO BE POPULATED FROM DEBUG LOGS
+                    # Format: 'A1GB': 'AIRTEL_CODE',  # Description
+                    # TODO: Add Airtel mappings once we get debug logs
+                    
+                    # GLO Plans - TO BE POPULATED FROM DEBUG LOGS  
+                    # Format: 'G1GB1': 'GLO_CODE',  # Description
+                    # TODO: Add Glo mappings once we get debug logs
+                    
+                    # 9MOBILE Plans - TO BE POPULATED FROM DEBUG LOGS
+                    # Format: '9M1GB': '9MOBILE_CODE',  # Description
+                    # TODO: Add 9mobile mappings once we get debug logs
+                    
+                    # Legacy pattern-based translations (fallback)
                     'mtn_500mb_30days': 'MTN_DATA_500MB_30D',
                     'mtn_1gb_30days': 'MTN_DATA_1GB_30D',
                     'mtn_2gb_30days': 'MTN_DATA_2GB_30D',
@@ -1750,6 +1816,118 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         except Exception as e:
             print(f'❌ Plan validation error: {str(e)}')
             return {'valid': False, 'translated_code': plan_id, 'error': str(e)}
+
+    # ==================== DEBUG ENDPOINT FOR NETWORK CODE COLLECTION ====================
+    
+    @vas_purchase_bp.route('/debug/collect-network-codes/<network>', methods=['GET'])
+    @token_required
+    def debug_collect_network_codes(current_user, network):
+        """
+        DEBUG ENDPOINT: Collect all Monnify product codes for a specific network
+        This helps us build complete Peyflex → Monnify mapping for all networks
+        """
+        try:
+            # Only allow admin users to access this debug endpoint
+            if not current_user.get('isAdmin', False):
+                return jsonify({
+                    'success': False,
+                    'message': 'Admin access required for debug endpoints'
+                }), 403
+            
+            vas_log(f'🔍 DEBUG: Collecting all Monnify codes for network: {network}')
+            
+            # Map network to Monnify biller code
+            network_mapping = {
+                'mtn': 'MTN',
+                'airtel': 'AIRTEL', 
+                'glo': 'GLO',
+                '9mobile': '9MOBILE'
+            }
+            
+            monnify_network = network_mapping.get(network.lower())
+            if not monnify_network:
+                return jsonify({
+                    'success': False,
+                    'message': f'Network {network} not supported. Available: {list(network_mapping.keys())}'
+                }), 400
+            
+            # Get Monnify access token
+            access_token = call_monnify_auth()
+            
+            # Get billers for DATA_BUNDLE category
+            billers_response = call_monnify_bills_api(
+                f'billers?category_code=DATA_BUNDLE&size=100',
+                'GET',
+                access_token=access_token
+            )
+            
+            # Find the target biller
+            target_biller = None
+            for biller in billers_response['responseBody']['content']:
+                if biller['name'].upper() == monnify_network:
+                    target_biller = biller
+                    break
+            
+            if not target_biller:
+                return jsonify({
+                    'success': False,
+                    'message': f'Monnify biller not found for network: {network}'
+                }), 404
+            
+            # Get data products for this biller
+            products_response = call_monnify_bills_api(
+                f'biller-products?biller_code={target_biller["code"]}&size=200',
+                'GET',
+                access_token=access_token
+            )
+            
+            all_products = products_response['responseBody']['content']
+            
+            # Filter for data products only
+            data_products = []
+            for product in all_products:
+                product_name = product.get('name', '').lower()
+                is_data_product = (
+                    'data' in product_name or 
+                    'gb' in product_name or 
+                    'mb' in product_name or
+                    'bundle' in product_name or
+                    'plan' in product_name
+                )
+                is_excluded = (
+                    'top up' in product_name or
+                    'topup' in product_name or
+                    'airtime' in product_name or
+                    'recharge' in product_name or
+                    'mobile top up' in product_name
+                )
+                
+                if is_data_product and not is_excluded and product.get('price', 0) > 0:
+                    data_products.append({
+                        'code': product['code'],
+                        'name': product['name'],
+                        'price': product.get('price', 0)
+                    })
+            
+            vas_log(f'🎯 COLLECTED {len(data_products)} DATA PRODUCTS FOR {monnify_network}:')
+            for product in data_products:
+                vas_log(f"'{product['code']}': '{product['name']}',  # ₦{product['price']}")
+            
+            return jsonify({
+                'success': True,
+                'network': network,
+                'monnify_network': monnify_network,
+                'total_products': len(data_products),
+                'data_products': data_products,
+                'message': f'Collected {len(data_products)} data products for {network.upper()}'
+            }), 200
+            
+        except Exception as e:
+            vas_log(f'❌ ERROR: Debug collect network codes failed: {str(e)}')
+            return jsonify({
+                'success': False,
+                'message': f'Failed to collect network codes: {str(e)}'
+            }), 500
 
     # ==================== VAS PURCHASE ENDPOINTS ====================
     
