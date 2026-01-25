@@ -117,6 +117,7 @@ def init_reports_blueprint(mongo, token_required):
         except Exception as e:
             # DISABLED FOR LIQUID WALLET FOCUS
             # print(f"Error logging export event: {str(e)}")
+            pass
     
     def parse_date_range(request_data):
         """
