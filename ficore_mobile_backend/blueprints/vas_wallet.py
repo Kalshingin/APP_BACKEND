@@ -32,8 +32,22 @@ def get_user_balance_queue(user_id):
     """Get or create balance update queue for user"""
     with balance_update_lock:
         if user_id not in balance_update_queues:
-            balance_update_queues[user_id] = queue.Queue()
+            balance_update_queues[user_id] = queue.Queue(maxsize=100)  # Prevent unbounded growth
         return balance_update_queues[user_id]
+
+def cleanup_user_balance_queue(user_id):
+    """Clean up user's balance queue when connection closes"""
+    with balance_update_lock:
+        if user_id in balance_update_queues:
+            try:
+                # Clear any remaining items
+                while not balance_update_queues[user_id].empty():
+                    balance_update_queues[user_id].get_nowait()
+            except queue.Empty:
+                pass
+            # Remove the queue
+            del balance_update_queues[user_id]
+            print(f'INFO: Cleaned up balance queue for user {user_id}')
 
 def push_balance_update(user_id, update_data):
     """Push balance update to user's SSE stream - GLOBAL FUNCTION"""
@@ -309,11 +323,15 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
             
             def event_stream():
                 """Generate SSE events for balance updates"""
+                connection_active = True
+                heartbeat_count = 0
+                max_heartbeats = 120  # 1 hour max connection (30s * 120 = 3600s)
+                
                 try:
                     # Send initial connection confirmation
                     yield f"data: {json.dumps({'type': 'connected', 'user_id': user_id, 'timestamp': datetime.utcnow().isoformat()})}\n\n"
                     
-                    while True:
+                    while connection_active and heartbeat_count < max_heartbeats:
                         try:
                             # Wait for balance update events (30 second timeout)
                             update = user_queue.get(timeout=30)
@@ -321,14 +339,26 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                             
                         except queue.Empty:
                             # Send heartbeat every 30 seconds to keep connection alive
+                            heartbeat_count += 1
                             heartbeat = {
                                 'type': 'heartbeat',
-                                'timestamp': datetime.utcnow().isoformat()
+                                'timestamp': datetime.utcnow().isoformat(),
+                                'count': heartbeat_count
                             }
                             yield f"data: {json.dumps(heartbeat)}\n\n"
                             
+                        except queue.Full:
+                            # Queue is full, send warning and continue
+                            warning = {
+                                'type': 'warning',
+                                'message': 'Update queue full, some updates may be missed',
+                                'timestamp': datetime.utcnow().isoformat()
+                            }
+                            yield f"data: {json.dumps(warning)}\n\n"
+                            
                 except GeneratorExit:
                     print(f'INFO: SSE connection closed for user {user_id}')
+                    connection_active = False
                 except Exception as e:
                     print(f'ERROR: SSE stream error for user {user_id}: {str(e)}')
                     error_event = {
@@ -337,16 +367,22 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                         'timestamp': datetime.utcnow().isoformat()
                     }
                     yield f"data: {json.dumps(error_event)}\n\n"
+                    connection_active = False
+                finally:
+                    # Always cleanup when connection ends
+                    cleanup_user_balance_queue(user_id)
+                    print(f'INFO: SSE stream ended for user {user_id} after {heartbeat_count} heartbeats')
             
             print(f'INFO: SSE stream started for user {user_id}')
             return Response(
                 event_stream(),
-                mimetype='text/plain',
+                mimetype='text/event-stream',  # Correct MIME type for SSE
                 headers={
                     'Cache-Control': 'no-cache',
                     'Connection': 'keep-alive',
                     'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Headers': 'Cache-Control'
+                    'Access-Control-Allow-Headers': 'Cache-Control',
+                    'X-Accel-Buffering': 'no'  # Disable nginx buffering
                 }
             )
             

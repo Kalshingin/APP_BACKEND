@@ -30,7 +30,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
     
     # ==================== HELPER FUNCTIONS ====================
     
-    def get_monnify_access_token():
+    def call_monnify_auth():
         """Get Monnify access token for Bills API"""
         try:
             import base64
@@ -67,7 +67,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
         """Generic Monnify Bills API caller"""
         try:
             if not access_token:
-                access_token = get_monnify_access_token()
+                access_token = call_monnify_auth()
             
             headers = {
                 'Authorization': f'Bearer {access_token}',
@@ -193,7 +193,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
         try:
             print('INFO: Fetching bill categories from Monnify Bills API')
             
-            access_token = get_monnify_access_token()
+            access_token = call_monnify_auth()
             response = call_monnify_bills_api(
                 'biller-categories?size=50',
                 'GET',
@@ -257,7 +257,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 }), 400
             
             print(f'INFO: Calling Monnify API for category: {monnify_category}')
-            access_token = get_monnify_access_token()
+            access_token = call_monnify_auth()
             response = call_monnify_bills_api(
                 f'billers?category_code={monnify_category}&size=100',
                 'GET',
@@ -341,7 +341,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
         try:
             print(f'INFO: Fetching bill products for provider: {provider}')
             
-            access_token = get_monnify_access_token()
+            access_token = call_monnify_auth()
             response = call_monnify_bills_api(
                 f'biller-products?biller_code={provider}&size=100',
                 'GET',
@@ -418,7 +418,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                     }
                 }), 400
             
-            access_token = get_monnify_access_token()
+            access_token = call_monnify_auth()
             response = call_monnify_bills_api(
                 'validate-customer',
                 'POST',
@@ -600,7 +600,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
             print(f'INFO: Created atomic transaction with ID: {transaction_id}')
             
             # Call Monnify Bills API
-            access_token = get_monnify_access_token()
+            access_token = call_monnify_auth()
             
             vend_data = {
                 'productCode': product_code,

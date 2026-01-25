@@ -19,7 +19,7 @@ from utils.dynamic_pricing_engine import get_pricing_engine, calculate_vas_price
 from utils.emergency_pricing_recovery import tag_emergency_transaction
 from blueprints.notifications import create_user_notification
 from blueprints.vas_wallet import push_balance_update
-from utils.monnify_utils import get_monnify_access_token, call_monnify_bills_api
+from utils.monnify_utils import call_monnify_auth, call_monnify_bills_api
 
 def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     vas_purchase_bp = Blueprint('vas_purchase', __name__, url_prefix='/api/vas/purchase')
@@ -42,9 +42,8 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
     PROVIDER_NETWORK_MAP = {
         'mtn': {
             'monnify': 'MTN',
-            'peyflex': 'mtn_sme_data'  # or mtn_gifting_data based on your UI
+            'peyflex': 'mtn_sme_data'  # or mtn_sme_data based on your UI
         },
-        
         'airtel': {
             'monnify': 'AIRTEL',
             'peyflex': 'airtel_data'
@@ -52,10 +51,6 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         'glo': {
             'monnify': 'GLO',
             'peyflex': 'glo_data'
-        },
-        'mtn': {
-            'monnify': 'MTN',
-            'peyflex': 'mtn_gifting_data'  # or mtn_sme_data based on your UI
         },
         '9mobile': {
             'monnify': '9MOBILE',
@@ -82,7 +77,6 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         except Exception as e:
             print(f'WARNING: Error generating retention description: {str(e)}')
             return base_description  # Fallback to base description
-                
     
     def generate_request_id(user_id, transaction_type):
         """Generate unique request ID for idempotency"""
@@ -124,7 +118,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             print(f'   Mapped to Monnify: {monnify_network}')
             
             # Step 2: Get access token
-            access_token = get_monnify_access_token()
+            access_token = call_monnify_auth()
             
             # Step 3: Find airtime biller for this network
             billers_response = call_monnify_bills_api(
@@ -294,7 +288,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             print(f'   Mapped to Monnify: {monnify_network}')
             
             # Step 2: Get access token
-            access_token = get_monnify_access_token()
+            access_token = call_monnify_auth()
             
             # Step 3: Find data biller for this network
             billers_response = call_monnify_bills_api(
@@ -924,7 +918,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             # Try Monnify first
             try:
-                access_token = get_monnify_access_token()
+                access_token = call_monnify_auth()
                 billers_response = call_monnify_bills_api(
                     'billers?category_code=AIRTIME&size=100',
                     'GET',
@@ -1036,7 +1030,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             # Try Monnify first
             try:
-                access_token = get_monnify_access_token()
+                access_token = call_monnify_auth()
                 billers_response = call_monnify_bills_api(
                     'billers?category_code=DATA_BUNDLE&size=100',
                     'GET',
@@ -1189,7 +1183,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             # Try Monnify first
             try:
-                access_token = get_monnify_access_token()
+                access_token = call_monnify_auth()
                 
                 # Map network to Monnify biller code
                 network_mapping = {
@@ -2217,8 +2211,8 @@ def validate_data_plan_exists(network, plan_id, expected_amount):
         
         # Check Monnify first
         try:
-            from utils.monnify_utils import get_monnify_access_token, call_monnify_bills_api
-            access_token = get_monnify_access_token()
+            from utils.monnify_utils import call_monnify_bills_api
+            access_token = call_monnify_auth()
             network_mapping = {
                 'MTN': 'MTN',
                 'AIRTEL': 'AIRTEL', 
@@ -2487,5 +2481,3 @@ def log_plan_mismatch(user_id, provider, mismatch_details):
     except Exception as e:
         print(f'❌ Failed to log plan mismatch: {str(e)}')
         return None
-
-

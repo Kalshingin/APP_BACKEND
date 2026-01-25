@@ -12,7 +12,7 @@ import requests
 import base64
 
 
-def get_monnify_access_token():
+def call_monnify_auth():
     """Get Monnify access token for Bills API"""
     try:
         # Environment variables
@@ -31,7 +31,7 @@ def get_monnify_access_token():
         
         url = f"{MONNIFY_BASE_URL}/api/v1/auth/login"
         
-        response = requests.post(url, headers=headers, timeout=30)
+        response = requests.post(url, headers=headers, timeout=8)
         
         if response.status_code == 200:
             data = response.json()
@@ -53,7 +53,7 @@ def call_monnify_bills_api(endpoint, method='GET', data=None, access_token=None)
     """Generic Monnify Bills API caller"""
     try:
         if not access_token:
-            access_token = get_monnify_access_token()
+            access_token = call_monnify_auth()
         
         # Environment variables
         MONNIFY_BASE_URL = os.environ.get('MONNIFY_BASE_URL', 'https://sandbox.monnify.com')
@@ -67,9 +67,9 @@ def call_monnify_bills_api(endpoint, method='GET', data=None, access_token=None)
         url = f"{MONNIFY_BILLS_BASE_URL}/{endpoint}"
         
         if method.upper() == 'GET':
-            response = requests.get(url, headers=headers, timeout=30)
+            response = requests.get(url, headers=headers, timeout=8)
         elif method.upper() == 'POST':
-            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response = requests.post(url, headers=headers, json=data, timeout=8)
         else:
             raise Exception(f"Unsupported HTTP method: {method}")
         
