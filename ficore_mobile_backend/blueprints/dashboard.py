@@ -295,6 +295,7 @@ def init_dashboard_blueprint(mongo, token_required, serialize_doc):
             except Exception as e:
                 # DISABLED FOR LIQUID WALLET FOCUS
                 # print(f"Analytics tracking failed: {e}")
+                pass
             
             period = request.args.get('period', 'monthly')
             start_date, end_date = get_date_range(period)
