@@ -37,7 +37,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                     ]
                 }).sort('createdAt', -1).limit(limit))
                 
-                print(f"Found {len(recent_expenses)} expense transactions for user {current_user['_id']}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Found {len(recent_expenses)} expense transactions for user {current_user['_id']}")
                 
                 for expense in recent_expenses:
                     activity = {
@@ -55,9 +56,11 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         'color': 'red'
                     }
                     activities.append(activity)
-                    print(f"Added expense activity: {activity['title']} - ₦{expense.get('amount', 0)}")
+                    # DISABLED FOR LIQUID WALLET FOCUS
+                    # print(f"Added expense activity: {activity['title']} - ₦{expense.get('amount', 0)}")
             except Exception as e:
-                print(f"Error fetching expenses: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error fetching expenses: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -74,7 +77,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                     ]
                 }).sort('createdAt', -1).limit(limit))
                 
-                print(f"Found {len(recent_incomes)} income transactions for user {current_user['_id']}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Found {len(recent_incomes)} income transactions for user {current_user['_id']}")
                 
                 for income in recent_incomes:
                     activity = {
@@ -92,9 +96,11 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         'color': 'green'
                     }
                     activities.append(activity)
-                    print(f"Added income activity: {activity['title']} - ₦{income.get('amount', 0)}")
+                    # DISABLED FOR LIQUID WALLET FOCUS
+                    # print(f"Added income activity: {activity['title']} - ₦{income.get('amount', 0)}")
             except Exception as e:
-                print(f"Error fetching incomes: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error fetching incomes: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -104,8 +110,9 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             # Limit to requested number
             activities = activities[:limit]
             
-            print(f"Final activities count: {len(activities)}")
-            print(f"Activity types: {[a['type'] for a in activities[:5]]}")  # Show first 5 types
+            # DISABLED FOR LIQUID WALLET FOCUS
+            # print(f"Final activities count: {len(activities)}")
+            # print(f"Activity types: {[a['type'] for a in activities[:5]]}")  # Show first 5 types
 
             return jsonify({
                 'success': True,
@@ -118,7 +125,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             })
 
         except Exception as e:
-            print(f"Error in get_recent_activity: {e}")
+            # DISABLED FOR LIQUID WALLET FOCUS
+            # print(f"Error in get_recent_activity: {e}")
             return jsonify({
                 'success': False,
                 'message': 'Failed to retrieve recent activities',
@@ -196,7 +204,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         }
                         activities.append(activity)
                 except Exception as e:
-                    print(f"Error fetching VAS transactions: {e}")
+                    # DISABLED FOR LIQUID WALLET FOCUS
+                    # print(f"Error fetching VAS transactions: {e}")
 
             if activity_type in ['all', 'expense']:
                 try:
@@ -227,7 +236,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         }
                         activities.append(activity)
                 except Exception as e:
-                    print(f"Error fetching expenses: {e}")
+                    # DISABLED FOR LIQUID WALLET FOCUS
+                    # print(f"Error fetching expenses: {e}")
 
             if activity_type in ['all', 'income']:
                 try:
@@ -258,7 +268,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         }
                         activities.append(activity)
                 except Exception as e:
-                    print(f"Error fetching incomes: {e}")
+                    # DISABLED FOR LIQUID WALLET FOCUS
+                    # print(f"Error fetching incomes: {e}")
 
             # Sort all activities by date (most recent first)
             activities.sort(key=lambda x: x['date'], reverse=True)
@@ -286,7 +297,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             })
 
         except Exception as e:
-            print(f"Error in get_all_activities: {e}")
+            # DISABLED FOR LIQUID WALLET FOCUS
+            # print(f"Error in get_all_activities: {e}")
             return jsonify({
                 'success': False,
                 'message': 'Failed to retrieve activities',
@@ -330,7 +342,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 if user:
                     summary_data['creditBalance'] = float(user.get('ficoreCreditBalance', 0.0))
             except Exception as e:
-                print(f"Error fetching user balance: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error fetching user balance: {e}")
             
             # Get ALL income data with proper aggregation
             try:
@@ -398,10 +411,12 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 summary_data['yearlyIncome'] = yearly_income
                 summary_data['yearlyStats']['income'] = yearly_income
                 
-                print(f"DEBUG ENHANCED SUMMARY - Total Income: {summary_data['totalIncome']}, Monthly: {monthly_income}, Yearly: {yearly_income}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"DEBUG ENHANCED SUMMARY - Total Income: {summary_data['totalIncome']}, Monthly: {monthly_income}, Yearly: {yearly_income}")
                 
             except Exception as e:
-                print(f"Error fetching incomes: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error fetching incomes: {e}")
             
             # CRITICAL FIX: Get ALL expense data with optimized single aggregation pipeline
             try:
@@ -504,10 +519,12 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                     summary_data['yearlyExpenseRecords'] = 0
                     summary_data['yearlyStats']['expenses'] = 0.0
                 
-                print(f"DEBUG OPTIMIZED SUMMARY - Total Expenses: {summary_data['totalExpenses']}, Monthly: {summary_data['monthlyExpenses']}, Yearly: {summary_data['yearlyExpenses']}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"DEBUG OPTIMIZED SUMMARY - Total Expenses: {summary_data['totalExpenses']}, Monthly: {summary_data['monthlyExpenses']}, Yearly: {summary_data['yearlyExpenses']}")
                 
             except Exception as e:
-                print(f"Error fetching expenses: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error fetching expenses: {e}")
                 # Fallback to zero values on error
                 summary_data['totalExpenses'] = 0.0
                 summary_data['totalExpenseRecords'] = 0
@@ -566,10 +583,12 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         'overdueAmount': 0.0
                     }
                 
-                print(f"DEBUG ENHANCED SUMMARY - Debtors: {summary_data['debtorsData']}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"DEBUG ENHANCED SUMMARY - Debtors: {summary_data['debtorsData']}")
                 
             except Exception as e:
-                print(f"Error fetching debtors data: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error fetching debtors data: {e}")
                 summary_data['debtorsData'] = {
                     'totalCustomers': 0,
                     'totalOutstanding': 0.0,
@@ -624,10 +643,12 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         'overdueAmount': 0.0
                     }
                 
-                print(f"DEBUG ENHANCED SUMMARY - Creditors: {summary_data['creditorsData']}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"DEBUG ENHANCED SUMMARY - Creditors: {summary_data['creditorsData']}")
                 
             except Exception as e:
-                print(f"Error fetching creditors data: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error fetching creditors data: {e}")
                 summary_data['creditorsData'] = {
                     'totalVendors': 0,
                     'totalOwed': 0.0,
@@ -684,10 +705,12 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                         'activeItems': 0
                     }
                 
-                print(f"DEBUG ENHANCED SUMMARY - Inventory: {summary_data['inventoryData']}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"DEBUG ENHANCED SUMMARY - Inventory: {summary_data['inventoryData']}")
                 
             except Exception as e:
-                print(f"Error fetching inventory data: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error fetching inventory data: {e}")
                 summary_data['inventoryData'] = {
                     'totalItems': 0,
                     'totalValue': 0.0,
@@ -711,9 +734,11 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
                 )
                 summary_data['recentActivitiesCount'] = recent_activities_count
             except Exception as e:
-                print(f"Error counting recent activities: {e}")
+                # DISABLED FOR LIQUID WALLET FOCUS
+                # print(f"Error counting recent activities: {e}")
 
-            print(f"DEBUG FINAL SUMMARY DATA: {summary_data}")
+            # DISABLED FOR LIQUID WALLET FOCUS
+            # print(f"DEBUG FINAL SUMMARY DATA: {summary_data}")
 
             return jsonify({
                 'success': True,
@@ -722,7 +747,8 @@ def init_summaries_blueprint(mongo, token_required, serialize_doc):
             })
 
         except Exception as e:
-            print(f"Error in get_dashboard_summary: {e}")
+            # DISABLED FOR LIQUID WALLET FOCUS
+            # print(f"Error in get_dashboard_summary: {e}")
             return jsonify({
                 'success': False,
                 'message': 'Failed to retrieve dashboard summary',

@@ -4491,7 +4491,8 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
             current_balance = wallet.get('balance', 0.0)
             new_balance = current_balance + amount
 
-            # Update wallet balance
+            # CRITICAL FIX: Update BOTH balances simultaneously for instant sync
+            # Update VAS wallet balance
             mongo.db.vas_wallets.update_one(
                 {'userId': ObjectId(user_id)},
                 {
@@ -4501,6 +4502,25 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                     }
                 }
             )
+            
+            # 🚀 STREAM FIX: Also update user's liquidWalletBalance for instant frontend updates
+            mongo.db.users.update_one(
+                {'_id': ObjectId(user_id)},
+                {'$set': {'liquidWalletBalance': new_balance, 'liquidWalletLastUpdated': datetime.utcnow()}}
+            )
+            
+            print(f'SUCCESS: Updated BOTH balances after admin refund - VAS wallet: ₦{new_balance:,.2f}, Liquid wallet: ₦{new_balance:,.2f}')
+            
+            # 🚀 INSTANT BALANCE UPDATE: Push real-time update to frontend
+            from blueprints.vas_wallet import push_balance_update
+            push_balance_update(user_id, {
+                'type': 'balance_update',
+                'new_balance': new_balance,
+                'amount_credited': amount,
+                'transaction_type': 'ADMIN_REFUND',
+                'reason': reason,
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            })
 
             # Create refund transaction record
             refund_transaction = {

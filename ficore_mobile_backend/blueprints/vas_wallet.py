@@ -13,6 +13,10 @@ from bson import ObjectId
 import os
 import requests
 import hmac
+import time
+import threading
+import queue
+import json
 import hashlib
 import uuid
 import json
@@ -43,7 +47,7 @@ def get_user_balance_queue(user_id):
     """Get or create balance update queue for user"""
     with balance_update_lock:
         if user_id not in balance_update_queues:
-            balance_update_queues[user_id] = queue.Queue(maxsize=100)  # Prevent unbounded growth
+            balance_update_queues[user_id] = queue.Queue(maxsize=50)  # REDUCED: Smaller queue to prevent memory buildup
         return balance_update_queues[user_id]
 
 def cleanup_user_balance_queue(user_id):
@@ -53,9 +57,12 @@ def cleanup_user_balance_queue(user_id):
             try:
                 # Clear any remaining items
                 while not balance_update_queues[user_id].empty():
-                    balance_update_queues[user_id].get_nowait()
-            except queue.Empty:
-                pass
+                    try:
+                        balance_update_queues[user_id].get_nowait()
+                    except queue.Empty:
+                        break
+            except Exception as e:
+                print(f'WARNING: Error clearing queue for user {user_id}: {str(e)}')
             # Remove the queue
             del balance_update_queues[user_id]
             print(f'INFO: Cleaned up balance queue for user {user_id}')
@@ -63,6 +70,22 @@ def cleanup_user_balance_queue(user_id):
         # Remove from active connections
         if user_id in active_connections:
             del active_connections[user_id]
+
+def cleanup_stale_connections():
+    """Clean up stale connections that have been active too long"""
+    current_time = time.time()
+    stale_users = []
+    
+    with balance_update_lock:
+        for user_id, conn_info in active_connections.items():
+            # Remove connections older than 10 minutes
+            if current_time - conn_info.get('start_time', 0) > 600:
+                stale_users.append(user_id)
+    
+    # Clean up stale connections
+    for user_id in stale_users:
+        cleanup_user_balance_queue(user_id)
+        print(f'INFO: Cleaned up stale connection for user {user_id}')
 
 def is_connection_active(user_id):
     """Check if user has an active SSE connection"""
@@ -340,6 +363,9 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
         try:
             user_id = str(current_user['_id'])
             
+            # Clean up any stale connections first
+            cleanup_stale_connections()
+            
             # Check if user already has an active connection
             if is_connection_active(user_id):
                 return jsonify({
@@ -347,6 +373,15 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                     'message': 'User already has an active SSE connection',
                     'errors': {'connection': ['Only one SSE connection allowed per user']}
                 }), 409
+            
+            # SAFETY: Limit total concurrent connections to prevent memory exhaustion
+            with balance_update_lock:
+                if len(active_connections) >= 50:  # Max 50 concurrent SSE connections
+                    return jsonify({
+                        'success': False,
+                        'message': 'Server at maximum SSE connection capacity',
+                        'errors': {'connection': ['Too many active connections. Please try again later.']}
+                    }), 503
             
             user_queue = get_user_balance_queue(user_id)
             
@@ -361,7 +396,7 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                 """Generate SSE events for balance updates"""
                 connection_active = True
                 heartbeat_count = 0
-                max_heartbeats = 60  # 30 minutes max connection (30s * 60 = 1800s)
+                max_heartbeats = 10  # REDUCED: 5 minutes max connection (30s * 10 = 300s) to prevent worker timeout
                 
                 try:
                     # Send initial connection confirmation
@@ -374,12 +409,12 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                                 connection_active = False
                                 break
                                 
-                            # Wait for balance update events (30 second timeout)
-                            update = user_queue.get(timeout=30)
+                            # REDUCED: Wait for balance update events (15 second timeout instead of 30)
+                            update = user_queue.get(timeout=15)
                             yield f"data: {json.dumps(update)}\n\n"
                             
                         except queue.Empty:
-                            # Send heartbeat every 30 seconds to keep connection alive
+                            # Send heartbeat every 15 seconds to keep connection alive
                             heartbeat_count += 1
                             heartbeat = {
                                 'type': 'heartbeat',
@@ -1748,29 +1783,32 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                     print(f"WARNING: Duplicate key error - transaction already exists: {transaction_reference}")
                     return jsonify({'success': True, 'message': 'Already processed'}), 200
                 
-                # ONLY update wallet balance after successful transaction insert
+                # CRITICAL FIX: Update BOTH balances using centralized utility
                 new_balance = wallet.get('balance', 0.0) + amount_to_credit
                 
-                mongo.db.vas_wallets.update_one(
-                    {'userId': ObjectId(user_id)},
-                    {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+                from utils.balance_sync import update_liquid_wallet_balance
+                
+                # Use centralized balance update utility
+                success = update_liquid_wallet_balance(
+                    mongo=mongo,
+                    user_id=user_id,
+                    new_balance=new_balance,
+                    transaction_reference=transaction_reference,
+                    transaction_type='WALLET_FUNDING',
+                    push_sse_update=True,
+                    sse_data={
+                        'previous_balance': wallet.get('balance', 0.0),
+                        'amount_credited': amount_to_credit,
+                        'amount_paid': amount_paid,
+                        'deposit_fee': deposit_fee,
+                        'is_premium': is_premium
+                    }
                 )
                 
-                # INSTANT BALANCE UPDATE VIA SSE - PUSH TO FRONTEND IMMEDIATELY
-                balance_update = {
-                    'type': 'balance_update',
-                    'user_id': user_id,
-                    'new_balance': new_balance,
-                    'previous_balance': wallet.get('balance', 0.0),
-                    'amount_credited': amount_to_credit,
-                    'amount_paid': amount_paid,
-                    'deposit_fee': deposit_fee,
-                    'transaction_reference': transaction_reference,
-                    'transaction_type': 'WALLET_FUNDING',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'is_premium': is_premium
-                }
-                push_balance_update(user_id, balance_update)
+                if not success:
+                    print(f'WARNING: Balance update may have failed for user {user_id}')
+                else:
+                    print(f'SUCCESS: Updated BOTH balances using utility - New balance: ₦{new_balance:,.2f}')
                 
                 # Record corporate revenue (₦ 30 fee)
                 if deposit_fee > 0:

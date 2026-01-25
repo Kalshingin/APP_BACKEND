@@ -706,13 +706,32 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
             # Update wallet balance if successful
             if final_status == 'SUCCESS':
                 print(f'SUCCESS: Transaction successful, deducting ₦ {amount:,.2f} from wallet')
-                mongo.db.vas_wallets.update_one(
-                    {'userId': current_user['_id']},
-                    {
-                        '$inc': {'balance': -amount},
-                        '$set': {'lastUpdated': datetime.utcnow()}
+                
+                # CRITICAL FIX: Update BOTH balances using centralized utility
+                current_wallet = mongo.db.vas_wallets.find_one({'userId': current_user['_id']})
+                new_balance = current_wallet.get('balance', 0.0) - amount
+                
+                from utils.balance_sync import update_liquid_wallet_balance
+                
+                # Use centralized balance update utility
+                success = update_liquid_wallet_balance(
+                    mongo=mongo,
+                    user_id=str(current_user['_id']),
+                    new_balance=new_balance,
+                    transaction_reference=transaction_ref,
+                    transaction_type='BILL_PAYMENT',
+                    push_sse_update=True,
+                    sse_data={
+                        'amount_debited': amount,
+                        'bill_category': category,
+                        'provider': provider
                     }
                 )
+                
+                if not success:
+                    print(f'WARNING: Balance update may have failed for user {current_user["_id"]}')
+                else:
+                    print(f'SUCCESS: Updated BOTH balances using utility after bill payment - New balance: ₦{new_balance:,.2f}')
                 
                 # Auto-create expense entry (auto-bookkeeping) for bill payments
                 try:

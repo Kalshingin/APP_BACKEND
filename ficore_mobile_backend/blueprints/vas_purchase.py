@@ -1849,24 +1849,30 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     'errors': {'general': [error_message]}
                 }), 500
             
-            # Deduct selling price from wallet (not face value)
+            # CRITICAL FIX: Update BOTH balances using centralized utility
             new_balance = wallet.get('balance', 0.0) - total_amount
-            mongo.db.vas_wallets.update_one(
-                {'userId': ObjectId(user_id)},
-                {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+            
+            from utils.balance_sync import update_liquid_wallet_balance
+            
+            # Use centralized balance update utility
+            success = update_liquid_wallet_balance(
+                mongo=mongo,
+                user_id=user_id,
+                new_balance=new_balance,
+                transaction_reference=request_id,
+                transaction_type='AIRTIME_PURCHASE',
+                push_sse_update=True,
+                sse_data={
+                    'amount_debited': total_amount,
+                    'network': network,
+                    'phone_number': phone_number[-4:] + '****'
+                }
             )
             
-            # 🚀 INSTANT BALANCE UPDATE: Push real-time update to frontend
-            push_balance_update(user_id, {
-                'type': 'balance_update',
-                'new_balance': new_balance,
-                'transaction_reference': request_id,
-                'amount_debited': total_amount,
-                'transaction_type': 'AIRTIME_PURCHASE',
-                'network': network,
-                'phone_number': phone_number[-4:] + '****',
-                'timestamp': datetime.utcnow().isoformat() + 'Z'
-            })
+            if not success:
+                print(f'WARNING: Balance update may have failed for user {user_id}')
+            else:
+                print(f'SUCCESS: Updated BOTH balances using utility after airtime purchase - New balance: ₦{new_balance:,.2f}')
             
             # Update transaction to SUCCESS
             update_result = mongo.db.vas_transactions.update_one(
@@ -2286,25 +2292,31 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     'errors': {'general': [error_message]}
                 }), 500
             
-            # Deduct selling price from wallet
+            # CRITICAL FIX: Update BOTH balances using centralized utility
             new_balance = wallet.get('balance', 0.0) - total_amount
-            mongo.db.vas_wallets.update_one(
-                {'userId': ObjectId(user_id)},
-                {'$set': {'balance': new_balance, 'updatedAt': datetime.utcnow()}}
+            
+            from utils.balance_sync import update_liquid_wallet_balance
+            
+            # Use centralized balance update utility
+            success = update_liquid_wallet_balance(
+                mongo=mongo,
+                user_id=user_id,
+                new_balance=new_balance,
+                transaction_reference=request_id,
+                transaction_type='DATA_PURCHASE',
+                push_sse_update=True,
+                sse_data={
+                    'amount_debited': total_amount,
+                    'network': network,
+                    'phone_number': phone_number[-4:] + '****',
+                    'plan_name': data_plan_name
+                }
             )
             
-            # 🚀 INSTANT BALANCE UPDATE: Push real-time update to frontend
-            push_balance_update(user_id, {
-                'type': 'balance_update',
-                'new_balance': new_balance,
-                'transaction_reference': request_id,
-                'amount_debited': total_amount,
-                'transaction_type': 'DATA_PURCHASE',
-                'network': network,
-                'phone_number': phone_number[-4:] + '****',
-                'plan_name': data_plan_name,
-                'timestamp': datetime.utcnow().isoformat() + 'Z'
-            })
+            if not success:
+                print(f'WARNING: Balance update may have failed for user {user_id}')
+            else:
+                print(f'SUCCESS: Updated BOTH balances using utility after data purchase - New balance: ₦{new_balance:,.2f}')
             
             # Update transaction to SUCCESS
             update_result = mongo.db.vas_transactions.update_one(
