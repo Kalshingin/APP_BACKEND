@@ -191,6 +191,8 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
     def get_bill_categories(current_user):
         """Get available bill categories from Monnify Bills API"""
         try:
+            print('VAS_DEBUG: Fetching bill categories from Monnify Bills API')
+            print(f'VAS_DEBUG: Route /api/vas/bills/categories was called by user {current_user["_id"]}')
             print('INFO: Fetching bill categories from Monnify Bills API')
             
             access_token = call_monnify_auth()
@@ -200,19 +202,30 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
+            print(f'VAS_DEBUG: Raw Monnify categories response: {json.dumps(response, indent=2)}')
             print(f'INFO: Monnify bill categories response: {response}')
             
             categories = []
-            for category in response['responseBody']['content']:
+            raw_categories = response['responseBody']['content']
+            print(f'VAS_DEBUG: Processing {len(raw_categories)} Monnify categories')
+            
+            for category in raw_categories:
                 # Filter out categories we already handle (AIRTIME, DATA_BUNDLE)
                 if category['code'] not in ['AIRTIME', 'DATA_BUNDLE']:
-                    categories.append({
+                    category_data = {
                         'id': category['code'].lower(),
                         'name': category['name'],
                         'code': category['code'],
                         'available': True,
                         'description': f"Pay {category['name'].lower().replace('_', ' ')} bills"
-                    })
+                    }
+                    categories.append(category_data)
+                    print(f'VAS_DEBUG: ✅ INCLUDED: {category["code"]} - {category["name"]} (available=True)')
+                else:
+                    print(f'VAS_DEBUG: ❌ EXCLUDED: {category["code"]} - {category["name"]} (already handled by VAS)')
+            
+            print(f'VAS_DEBUG: FINAL RESULT: {len(categories)} bill categories from Monnify (from {len(raw_categories)} total categories)')
+            print(f'SUCCESS: Successfully retrieved {len(categories)} categories from Monnify')
             
             print(f'SUCCESS: Processed {len(categories)} bill categories')
             
@@ -238,25 +251,75 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
         try:
             print(f'INFO: Fetching bill providers for category: {category}')
             
-            # Map frontend category to Monnify category
+            # Dynamic category mapping - handle both frontend names and Monnify codes
+            # First, try direct mapping for common frontend categories
             category_mapping = {
                 'electricity': 'ELECTRICITY',
-                'cable_tv': 'CABLE_TV',
+                'cable_tv': 'CABLE_TV', 
+                'cable': 'CABLE_TV',
+                'tv': 'CABLE_TV',
                 'water': 'WATER',
                 'internet': 'INTERNET',
-                'transportation': 'TRANSPORTATION'
+                'transportation': 'TRANSPORTATION',
+                'transport': 'TRANSPORTATION',
+                'betting': 'BETTING',
+                'gaming': 'BETTING',
+                'insurance': 'INSURANCE',
+                'education': 'EDUCATION',
+                'government': 'GOVERNMENT',
+                'tax': 'TAX',
+                'religious': 'RELIGIOUS',
+                'donation': 'DONATION',
+                'charity': 'DONATION'
             }
             
+            # Try direct mapping first
             monnify_category = category_mapping.get(category.lower())
+            
+            # If no direct mapping, try to match with actual Monnify categories
+            if not monnify_category:
+                # Get available categories from Monnify to find the best match
+                try:
+                    access_token_temp = call_monnify_auth()
+                    categories_response = call_monnify_bills_api(
+                        'biller-categories?size=50',
+                        'GET',
+                        access_token=access_token_temp
+                    )
+                    
+                    available_categories = [cat['code'] for cat in categories_response['responseBody']['content']]
+                    
+                    # Try case-insensitive exact match
+                    for available_cat in available_categories:
+                        if available_cat.lower() == category.lower():
+                            monnify_category = available_cat
+                            break
+                    
+                    # Try partial match
+                    if not monnify_category:
+                        for available_cat in available_categories:
+                            if category.lower() in available_cat.lower() or available_cat.lower() in category.lower():
+                                monnify_category = available_cat
+                                print(f'INFO: Using partial match: {category} -> {available_cat}')
+                                break
+                                
+                except Exception as mapping_error:
+                    print(f'WARNING: Could not fetch categories for dynamic mapping: {mapping_error}')
+            
             if not monnify_category:
                 print(f'ERROR: Unsupported category: {category}')
                 return jsonify({
                     'success': False,
                     'message': f'Unsupported category: {category}',
-                    'errors': {'category': [f'Category {category} is not supported']}
+                    'errors': {'category': [f'Category {category} is not supported']},
+                    'available_categories': list(category_mapping.keys())
                 }), 400
             
             print(f'INFO: Calling Monnify API for category: {monnify_category}')
+            print(f'VAS_DEBUG: Fetching bill providers for category: {category}')
+            print(f'VAS_DEBUG: Route /api/vas/bills/providers/{category} was called by user {current_user["_id"]}')
+            print(f'VAS_DEBUG: Mapped {category} → {monnify_category} for Monnify')
+            
             access_token = call_monnify_auth()
             response = call_monnify_bills_api(
                 f'billers?category_code={monnify_category}&size=100',
@@ -264,6 +327,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
+            print(f'VAS_DEBUG: Raw Monnify response for {monnify_category}: {json.dumps(response, indent=2)}')
             print(f'INFO: Monnify providers response for {monnify_category}: {response}')
             
             # DEBUGGING: Check if we're getting wrong providers for transportation
@@ -306,14 +370,22 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                     }), 503  # Service Unavailable
             
             providers = []
-            for biller in response['responseBody']['content']:
-                providers.append({
+            raw_providers = response['responseBody']['content']
+            print(f'VAS_DEBUG: Processing {len(raw_providers)} Monnify providers for {category}')
+            
+            for biller in raw_providers:
+                provider_data = {
                     'id': biller['code'],
                     'name': biller['name'],
                     'code': biller['code'],
                     'category': category,
                     'description': f"{biller['name']} - {category.replace('_', ' ').title()} provider"
-                })
+                }
+                providers.append(provider_data)
+                print(f'VAS_DEBUG: ✅ INCLUDED: {biller["code"]} - {biller["name"]} (category={category})')
+            
+            print(f'VAS_DEBUG: FINAL RESULT: {len(providers)} {category} providers from Monnify (from {len(raw_providers)} total providers)')
+            print(f'SUCCESS: Successfully retrieved {len(providers)} providers from Monnify for {category}')
             
             print(f'SUCCESS: Processed {len(providers)} providers for {category}')
             
@@ -339,6 +411,8 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
     def get_bill_products(current_user, provider):
         """Get products/packages for a specific provider"""
         try:
+            print(f'VAS_DEBUG: Fetching bill products for provider: {provider}')
+            print(f'VAS_DEBUG: Route /api/vas/bills/products/{provider} was called by user {current_user["_id"]}')
             print(f'INFO: Fetching bill products for provider: {provider}')
             
             access_token = call_monnify_auth()
@@ -348,10 +422,14 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
+            print(f'VAS_DEBUG: Raw Monnify products response for {provider}: {json.dumps(response, indent=2)}')
             print(f'INFO: Monnify products response for {provider}: {response}')
             
             products = []
-            for product in response['responseBody']['content']:
+            raw_products = response['responseBody']['content']
+            print(f'VAS_DEBUG: Processing {len(raw_products)} Monnify products for {provider}')
+            
+            for product in raw_products:
                 # Extract metadata for better product information
                 metadata = product.get('metadata', {})
                 duration = metadata.get('duration', 1)
@@ -361,7 +439,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 # Format duration display
                 duration_display = f"{duration} {duration_unit.lower()}" if duration_unit else "One-time"
                 
-                products.append({
+                product_data = {
                     'id': product['code'],
                     'name': product['name'],
                     'code': product['code'],
@@ -373,7 +451,14 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                     'productType': product_type.get('name', 'Service'),
                     'description': f"{product['name']} - {duration_display}",
                     'metadata': metadata
-                })
+                }
+                products.append(product_data)
+                
+                price_info = f"₦{product.get('price', 'Variable')}" if product.get('price') else f"₦{product.get('minAmount', 0)}-{product.get('maxAmount', 'Open')}"
+                print(f'VAS_DEBUG: ✅ INCLUDED: {product["code"]} - {product["name"]} - {price_info} (duration={duration_display})')
+            
+            print(f'VAS_DEBUG: FINAL RESULT: {len(products)} products for {provider} from Monnify (from {len(raw_products)} total products)')
+            print(f'SUCCESS: Successfully retrieved {len(products)} products from Monnify for {provider}')
             
             print(f'SUCCESS: Processed {len(products)} products for {provider}')
             

@@ -1504,7 +1504,18 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                     
                     # Handle specific error cases
                     if response.status_code == 404:
-                        error_msg = 'Reserved account not found. Please contact support.'
+                        # For accounts created before getAllBanks feature, gracefully handle
+                        print(f'INFO: Account {account_reference} was created before multi-bank feature')
+                        return jsonify({
+                            'success': True,
+                            'data': {
+                                'accounts': existing_accounts,
+                                'totalBanksNow': len(existing_accounts),
+                                'message': 'Your account was created before the multi-bank feature. You currently have access to your existing bank account(s).',
+                                'isLegacyAccount': True
+                            },
+                            'message': 'Account created before multi-bank feature - existing accounts available'
+                        }), 200
                     elif response.status_code == 400:
                         if 'not qualified' in error_msg.lower():
                             error_msg = 'Your account is not qualified to add additional bank accounts. Please complete your profile verification.'
