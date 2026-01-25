@@ -1086,7 +1086,19 @@ if __name__ == '__main__':
         print(f"⚠️  Scheduler initialization error (non-fatal): {str(e)}\n")
         # Don't fail app startup if scheduler fails
     
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Only run Flask development server if not running under Gunicorn
+    # Check if we're running under Gunicorn by looking for gunicorn in the process
+    import sys
+    if 'gunicorn' not in sys.modules and 'gunicorn' not in ' '.join(sys.argv):
+        print("🔧 Running Flask development server...")
+        app.run(debug=True, host='0.0.0.0', port=5000)
+    else:
+        print("🚀 Running under Gunicorn - Flask development server disabled")
+
+# Ensure app is available at module level for Gunicorn
+# This is critical for Gunicorn to find the app object
+if __name__ != '__main__':
+    print(f"🔍 Module imported by Gunicorn - app object available at: {__name__}.app")
 
 
 

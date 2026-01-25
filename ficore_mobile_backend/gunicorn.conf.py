@@ -7,6 +7,9 @@ import os
 bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
 backlog = 2048
 
+print(f"🚀 Gunicorn binding to: {bind}")
+print(f"🔧 PORT environment variable: {os.environ.get('PORT', 'not set')}")
+
 # Worker processes
 workers = int(os.environ.get('WEB_CONCURRENCY', '2'))
 worker_class = 'sync'  # Use sync workers (most stable)
