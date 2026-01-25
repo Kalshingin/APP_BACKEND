@@ -3,12 +3,13 @@
 
 import os
 
-# Server socket
-bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
+# Server socket - CRITICAL: Must bind to 0.0.0.0 for Render
+port = os.environ.get('PORT', '5000')
+bind = f"0.0.0.0:{port}"
 backlog = 2048
 
 print(f"🚀 Gunicorn binding to: {bind}")
-print(f"🔧 PORT environment variable: {os.environ.get('PORT', 'not set')}")
+print(f"🔧 PORT environment variable: {port}")
 
 # Worker processes
 workers = int(os.environ.get('WEB_CONCURRENCY', '2'))
@@ -45,7 +46,8 @@ limit_request_field_size = 8190
 # certfile = '/path/to/certfile'
 
 def when_ready(server):
-    server.log.info("FiCore Backend server is ready. Listening on %s", server.address)
+    server.log.info("🚀 FiCore Backend server is ready. Listening on %s", server.address)
+    print(f"✅ Server ready on {server.address}")
 
 def worker_int(worker):
     worker.log.info("Worker received INT or QUIT signal")
@@ -55,3 +57,4 @@ def pre_fork(server, worker):
 
 def post_fork(server, worker):
     server.log.info("Worker spawned (pid: %s)", worker.pid)
+    print(f"✅ Worker {worker.pid} ready")

@@ -434,9 +434,18 @@ app.register_blueprint(vas_bills_blueprint)
 print("✓ VAS Bills blueprint registered at /api/vas/bills")
 
 # Root redirect to admin login
-@app.route('/')
+@app.route('/', methods=['GET', 'HEAD'])
 def index():
-    """Redirect root URL to admin login page"""
+    """Redirect root URL to admin login page, but return 200 for health checks"""
+    # Check if this is a health check request (HEAD request or specific user agent)
+    if request.method == 'HEAD' or 'Go-http-client' in request.headers.get('User-Agent', ''):
+        return jsonify({
+            'status': 'healthy',
+            'service': 'FiCore Backend',
+            'timestamp': datetime.utcnow().isoformat()
+        }), 200
+    
+    # Regular browser requests get redirected to admin
     return redirect('/admin/admin_login.html')
 
 # Health check endpoint
