@@ -4626,6 +4626,196 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
                 'errors': {'general': [str(e)]}
             }), 500
 
+    @admin_bp.route('/users/<user_id>/wallet/deduct', methods=['POST'])
+    @token_required
+    @admin_required
+    def process_admin_deduction(current_user, user_id):
+        """Process admin deduction for dispute resolution or excess balance correction"""
+        try:
+            data = request.get_json()
+            amount = data.get('amount')
+            reason = data.get('reason', '').strip()
+            reference_transaction_id = data.get('referenceTransactionId', '').strip()
+            
+            # Validate inputs
+            if not amount or not isinstance(amount, (int, float)):
+                return jsonify({
+                    'success': False,
+                    'message': 'Valid deduction amount is required'
+                }), 400
+            
+            if amount <= 0:
+                return jsonify({
+                    'success': False,
+                    'message': 'Deduction amount must be greater than 0'
+                }), 400
+                
+            if not reason:
+                return jsonify({
+                    'success': False,
+                    'message': 'Deduction reason is required'
+                }), 400
+            
+            # Get user
+            user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
+            if not user:
+                return jsonify({
+                    'success': False,
+                    'message': 'User not found'
+                }), 404
+            
+            # Get current balance
+            current_balance = user.get('liquidWalletBalance', 0)
+            
+            # Check if user has sufficient balance
+            if current_balance < amount:
+                return jsonify({
+                    'success': False,
+                    'message': f'Insufficient balance. User has ₦{current_balance:,.2f}, cannot deduct ₦{amount:,.2f}'
+                }), 400
+            
+            # Calculate new balance
+            new_balance = current_balance - amount
+            
+            # Update user's liquid wallet balance
+            mongo.db.users.update_one(
+                {'_id': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'liquidWalletBalance': new_balance,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            print(f'SUCCESS: Updated balance after admin deduction - Liquid wallet: ₦{current_balance:,.2f} → ₦{new_balance:,.2f}')
+            
+            # 🚀 INSTANT BALANCE UPDATE: Push real-time update to frontend
+            from blueprints.vas_wallet import push_balance_update
+            push_balance_update(user_id, {
+                'type': 'balance_update',
+                'new_balance': new_balance,
+                'amount_deducted': amount,
+                'transaction_type': 'ADMIN_DEDUCTION',
+                'reason': reason,
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            })
+
+            # Create deduction transaction record
+            deduction_transaction = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'type': 'ADMIN_DEDUCTION',
+                'category': 'BALANCE_CORRECTION',
+                'amount': amount,
+                'balanceBefore': current_balance,
+                'balanceAfter': new_balance,
+                'status': 'SUCCESS',
+                'description': f'Admin deduction: {reason}',
+                'referenceTransactionId': reference_transaction_id,
+                'processedBy': current_user['_id'],
+                'createdAt': datetime.utcnow(),
+                'metadata': {
+                    'deductionType': 'admin_manual',
+                    'adminId': str(current_user['_id']),
+                    'adminName': current_user.get('displayName', 'Admin'),
+                    'reason': reason,
+                    'referenceTransaction': reference_transaction_id
+                }
+            }
+            
+            mongo.db.vas_transactions.insert_one(deduction_transaction)
+
+            # Create audit log entry
+            audit_entry = {
+                '_id': ObjectId(),
+                'adminId': current_user['_id'],
+                'adminEmail': current_user['email'],
+                'action': 'wallet_deduction',
+                'targetUserId': ObjectId(user_id),
+                'targetUserEmail': user['email'],
+                'timestamp': datetime.utcnow(),
+                'details': {
+                    'deduction_amount': amount,
+                    'wallet_balance_before': current_balance,
+                    'wallet_balance_after': new_balance,
+                    'transaction_id': str(deduction_transaction['_id']),
+                    'reason': reason,
+                    'reference_transaction': reference_transaction_id
+                }
+            }
+            
+            mongo.db.admin_actions.insert_one(audit_entry)
+
+            # Record corporate income (deductions are income for the company)
+            corporate_income = {
+                '_id': ObjectId(),
+                'type': 'CUSTOMER_DEDUCTION',
+                'category': 'BALANCE_CORRECTION',
+                'amount': amount,
+                'userId': ObjectId(user_id),
+                'relatedTransaction': str(deduction_transaction['_id']),
+                'description': f'Customer balance deduction - {reason}',
+                'status': 'RECORDED',
+                'processedBy': current_user['_id'],
+                'createdAt': datetime.utcnow(),
+                'metadata': {
+                    'deductionAmount': amount,
+                    'adminId': str(current_user['_id']),
+                    'adminName': current_user.get('displayName', 'Admin'),
+                    'reason': reason
+                }
+            }
+            mongo.db.corporate_income.insert_one(corporate_income)
+            print(f'💰 Corporate income recorded: ₦{amount} deduction from user {user_id} - Reason: {reason}')
+
+            # Create expense entry for user's records (deduction appears as expense)
+            expense_entry = {
+                '_id': ObjectId(),
+                'userId': ObjectId(user_id),
+                'title': f'Admin Deduction - {reason}',
+                'description': f'Balance correction by admin: {reason}',
+                'amount': amount,
+                'category': 'Administrative',
+                'subcategory': 'Balance Correction',
+                'transactionType': 'ADMIN_DEDUCTION',
+                'adminTransactionId': str(deduction_transaction['_id']),
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow(),
+                'status': 'active',
+                'isDeleted': False,
+                'source': 'admin_deduction'
+            }
+            
+            mongo.db.expenses.insert_one(expense_entry)
+            print(f'📝 Expense entry created for user records: ₦{amount} deduction')
+
+            return jsonify({
+                'success': True,
+                'data': {
+                    'transactionId': str(deduction_transaction['_id']),
+                    'amount': amount,
+                    'previousBalance': current_balance,
+                    'newBalance': new_balance,
+                    'reason': reason,
+                    'processedAt': datetime.utcnow().isoformat() + 'Z'
+                },
+                'message': f'Deduction of ₦{amount:,.2f} processed successfully'
+            })
+
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'message': 'Invalid amount format'
+            }), 400
+        except Exception as e:
+            print(f"Error processing admin deduction: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': 'Failed to process deduction',
+                'errors': {'general': [str(e)]}
+            }), 500
+
     @admin_bp.route('/users/<user_id>/wallet/pin-reset', methods=['POST'])
     @token_required
     @admin_required
