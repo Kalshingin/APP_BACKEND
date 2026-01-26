@@ -191,8 +191,8 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
     def get_bill_categories(current_user):
         """Get available bill categories from Monnify Bills API"""
         try:
-            print('VAS_DEBUG: Fetching bill categories from Monnify Bills API')
-            print(f'VAS_DEBUG: Route /api/vas/bills/categories was called by user {current_user["_id"]}')
+            # print('VAS_DEBUG: Fetching bill categories from Monnify Bills API')
+            # print(f'VAS_DEBUG: Route /api/vas/bills/categories was called by user {current_user["_id"]}')
             print('INFO: Fetching bill categories from Monnify Bills API')
             
             access_token = call_monnify_auth()
@@ -202,12 +202,12 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            print(f'VAS_DEBUG: Raw Monnify categories response: {json.dumps(response, indent=2)}')
+            # print(f'VAS_DEBUG: Raw Monnify categories response: {json.dumps(response, indent=2)}')
             print(f'INFO: Monnify bill categories response: {response}')
             
             categories = []
             raw_categories = response['responseBody']['content']
-            print(f'VAS_DEBUG: Processing {len(raw_categories)} Monnify categories')
+            # print(f'VAS_DEBUG: Processing {len(raw_categories)} Monnify categories')
             
             for category in raw_categories:
                 # Filter out categories we already handle (AIRTIME, DATA_BUNDLE)
@@ -220,11 +220,12 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                         'description': f"Pay {category['name'].lower().replace('_', ' ')} bills"
                     }
                     categories.append(category_data)
-                    print(f'VAS_DEBUG: ✅ INCLUDED: {category["code"]} - {category["name"]} (available=True)')
+                    # print(f'VAS_DEBUG: ✅ INCLUDED: {category["code"]} - {category["name"]} (available=True)')
                 else:
-                    print(f'VAS_DEBUG: ❌ EXCLUDED: {category["code"]} - {category["name"]} (already handled by VAS)')
+                    pass
+                    # print(f'VAS_DEBUG: ❌ EXCLUDED: {category["code"]} - {category["name"]} (already handled by VAS)')
             
-            print(f'VAS_DEBUG: FINAL RESULT: {len(categories)} bill categories from Monnify (from {len(raw_categories)} total categories)')
+            # print(f'VAS_DEBUG: FINAL RESULT: {len(categories)} bill categories from Monnify (from {len(raw_categories)} total categories)')
             print(f'SUCCESS: Successfully retrieved {len(categories)} categories from Monnify')
             
             print(f'SUCCESS: Processed {len(categories)} bill categories')
@@ -316,9 +317,9 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 }), 400
             
             print(f'INFO: Calling Monnify API for category: {monnify_category}')
-            print(f'VAS_DEBUG: Fetching bill providers for category: {category}')
-            print(f'VAS_DEBUG: Route /api/vas/bills/providers/{category} was called by user {current_user["_id"]}')
-            print(f'VAS_DEBUG: Mapped {category} → {monnify_category} for Monnify')
+            # print(f'VAS_DEBUG: Fetching bill providers for category: {category}')
+            # print(f'VAS_DEBUG: Route /api/vas/bills/providers/{category} was called by user {current_user["_id"]}')
+            # print(f'VAS_DEBUG: Mapped {category} → {monnify_category} for Monnify')
             
             access_token = call_monnify_auth()
             response = call_monnify_bills_api(
@@ -327,7 +328,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            print(f'VAS_DEBUG: Raw Monnify response for {monnify_category}: {json.dumps(response, indent=2)}')
+            # print(f'VAS_DEBUG: Raw Monnify response for {monnify_category}: {json.dumps(response, indent=2)}')
             print(f'INFO: Monnify providers response for {monnify_category}: {response}')
             
             # DEBUGGING: Check if we're getting wrong providers for transportation
@@ -371,7 +372,7 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
             
             providers = []
             raw_providers = response['responseBody']['content']
-            print(f'VAS_DEBUG: Processing {len(raw_providers)} Monnify providers for {category}')
+            # print(f'VAS_DEBUG: Processing {len(raw_providers)} Monnify providers for {category}')
             
             for biller in raw_providers:
                 provider_data = {
@@ -382,9 +383,9 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                     'description': f"{biller['name']} - {category.replace('_', ' ').title()} provider"
                 }
                 providers.append(provider_data)
-                print(f'VAS_DEBUG: ✅ INCLUDED: {biller["code"]} - {biller["name"]} (category={category})')
+                # print(f'VAS_DEBUG: ✅ INCLUDED: {biller["code"]} - {biller["name"]} (category={category})')
             
-            print(f'VAS_DEBUG: FINAL RESULT: {len(providers)} {category} providers from Monnify (from {len(raw_providers)} total providers)')
+            # print(f'VAS_DEBUG: FINAL RESULT: {len(providers)} {category} providers from Monnify (from {len(raw_providers)} total providers)')
             print(f'SUCCESS: Successfully retrieved {len(providers)} providers from Monnify for {category}')
             
             print(f'SUCCESS: Processed {len(providers)} providers for {category}')
@@ -411,8 +412,8 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
     def get_bill_products(current_user, provider):
         """Get products/packages for a specific provider"""
         try:
-            print(f'VAS_DEBUG: Fetching bill products for provider: {provider}')
-            print(f'VAS_DEBUG: Route /api/vas/bills/products/{provider} was called by user {current_user["_id"]}')
+            # print(f'VAS_DEBUG: Fetching bill products for provider: {provider}')
+            # print(f'VAS_DEBUG: Route /api/vas/bills/products/{provider} was called by user {current_user["_id"]}')
             print(f'INFO: Fetching bill products for provider: {provider}')
             
             access_token = call_monnify_auth()
@@ -422,12 +423,12 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            print(f'VAS_DEBUG: Raw Monnify products response for {provider}: {json.dumps(response, indent=2)}')
+            # print(f'VAS_DEBUG: Raw Monnify products response for {provider}: {json.dumps(response, indent=2)}')
             print(f'INFO: Monnify products response for {provider}: {response}')
             
             products = []
             raw_products = response['responseBody']['content']
-            print(f'VAS_DEBUG: Processing {len(raw_products)} Monnify products for {provider}')
+            # print(f'VAS_DEBUG: Processing {len(raw_products)} Monnify products for {provider}')
             
             for product in raw_products:
                 # Extract metadata for better product information
@@ -455,9 +456,9 @@ def init_vas_bills_blueprint(mongo, token_required, serialize_doc):
                 products.append(product_data)
                 
                 price_info = f"₦{product.get('price', 'Variable')}" if product.get('price') else f"₦{product.get('minAmount', 0)}-{product.get('maxAmount', 'Open')}"
-                print(f'VAS_DEBUG: ✅ INCLUDED: {product["code"]} - {product["name"]} - {price_info} (duration={duration_display})')
+                # print(f'VAS_DEBUG: ✅ INCLUDED: {product["code"]} - {product["name"]} - {price_info} (duration={duration_display})')
             
-            print(f'VAS_DEBUG: FINAL RESULT: {len(products)} products for {provider} from Monnify (from {len(raw_products)} total products)')
+            # print(f'VAS_DEBUG: FINAL RESULT: {len(products)} products for {provider} from Monnify (from {len(raw_products)} total products)')
             print(f'SUCCESS: Successfully retrieved {len(products)} products from Monnify for {provider}')
             
             print(f'SUCCESS: Processed {len(products)} products for {provider}')

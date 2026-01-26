@@ -177,7 +177,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             # DEBUG: Capture the full Monnify Biller List for this category
             available_billers = [b['name'] for b in billers_response['responseBody']['content']]
-            print(f"DEBUG: Monnify available AIRTIME billers: {available_billers}")
+            # print(f"DEBUG: Monnify available AIRTIME billers: {available_billers}")
             
             target_biller = None
             for biller in billers_response['responseBody']['content']:
@@ -200,9 +200,9 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             # DEBUG: Capture product dictionary for exact code matching
             all_products = products_response['responseBody']['content']
-            print(f'DEBUG: All available products for {monnify_network}:')
-            for product in all_products:
-                print(f'  - Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
+            # print(f'DEBUG: All available products for {monnify_network}:')
+            # for product in all_products:
+            #     print(f'  - Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
             
             # Strict match for airtime product (matches Monnify docs pattern)
             airtime_product = None
@@ -255,7 +255,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     vend_data['validationReference'] = validation_ref
                     print(f'INFO: Using validation reference: {validation_ref}')
             
-            print(f'DEBUG: Monnify vend payload: {vend_data}')
+            # print(f'DEBUG: Monnify vend payload: {vend_data}')
             
             # Step 7: Execute vend (purchase)
             print(f'INFO: Executing Monnify vend for airtime: {network_key} ₦{amount}')
@@ -266,7 +266,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            print(f'DEBUG: Monnify vend response: {vend_response}')
+            # print(f'DEBUG: Monnify vend response: {vend_response}')
             vend_result = vend_response['responseBody']
             
             if vend_result.get('vendStatus') == 'SUCCESS':
@@ -351,7 +351,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             
             # DEBUG: Capture the full Monnify Biller List for this category
             available_billers = [b['name'] for b in billers_response['responseBody']['content']]
-            print(f"DEBUG: Monnify available DATA_BUNDLE billers: {available_billers}")
+            # print(f"DEBUG: Monnify available DATA_BUNDLE billers: {available_billers}")
             
             target_biller = None
             for biller in billers_response['responseBody']['content']:
@@ -375,22 +375,22 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             # DEBUG: Capture product dictionary for exact code matching
             all_products = products_response['responseBody']['content']
             all_product_codes = [p['code'] for p in all_products]
-            print(f"DEBUG: Searching for Plan Code '{data_plan_code}' in Monnify List: {all_product_codes}")
+            # print(f"DEBUG: Searching for Plan Code '{data_plan_code}' in Monnify List: {all_product_codes}")
             
             # CRITICAL: Log ALL products for EVERY network to build complete mapping
-            print(f'🔍 COMPLETE MONNIFY PRODUCT LIST FOR {monnify_network}:')
-            print(f'DEBUG: All available data products for {monnify_network}:')
-            for i, product in enumerate(all_products):
-                print(f'- Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
-            print(f'TOTAL: {len(all_products)} products available for {monnify_network}')
-            print(f'🔍 END OF COMPLETE PRODUCT LIST FOR {monnify_network}')
+            # print(f'🔍 COMPLETE MONNIFY PRODUCT LIST FOR {monnify_network}:')
+            # print(f'DEBUG: All available data products for {monnify_network}:')
+            # for i, product in enumerate(all_products):
+            #     print(f'- Code: {product["code"]}, Name: {product["name"]}, Price: {product.get("price", "N/A")}')
+            # print(f'TOTAL: {len(all_products)} products available for {monnify_network}')
+            # print(f'🔍 END OF COMPLETE PRODUCT LIST FOR {monnify_network}')
             
             # Also log in a format easy to copy for mapping
-            print(f'📋 MAPPING FORMAT FOR {monnify_network}:')
-            for product in all_products:
-                if product.get('price') and product['price'] > 0:  # Only products with valid prices
-                    print(f"'{product['code']}': '{product['name']}',  # ₦{product['price']}")
-            print(f'📋 END MAPPING FORMAT FOR {monnify_network}')
+            # print(f'📋 MAPPING FORMAT FOR {monnify_network}:')
+            # for product in all_products:
+            #     if product.get('price') and product['price'] > 0:  # Only products with valid prices
+            #         print(f"'{product['code']}': '{product['name']}',  # ₦{product['price']}")
+            # print(f'📋 END MAPPING FORMAT FOR {monnify_network}')
             
             # Find matching data product by plan code with translation support
             data_product = None
@@ -400,22 +400,22 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             for product in all_products:
                 if product['code'] == data_plan_code:
                     data_product = product
-                    print(f'✅ EXACT MATCH: Found plan {data_plan_code}')
+                    # print(f'✅ EXACT MATCH: Found plan {data_plan_code}')
                     break
             
             # If no exact match, try with plan code translation
             if not data_product:
-                print(f'🔄 NO EXACT MATCH: Trying plan code translation for {data_plan_code}')
+                # print(f'🔄 NO EXACT MATCH: Trying plan code translation for {data_plan_code}')
                 validation_result = validate_plan_for_provider(data_plan_code, 'monnify', network_key)
                 translated_code = validation_result['translated_code']
                 
                 if translated_code != data_plan_code:
-                    print(f'🔄 TRYING TRANSLATED CODE: {translated_code}')
+                    # print(f'🔄 TRYING TRANSLATED CODE: {translated_code}')
                     for product in all_products:
                         if product['code'] == translated_code:
                             data_product = product
                             data_plan_code = translated_code  # Use translated code for API call
-                            print(f'✅ TRANSLATION MATCH: Found plan {translated_code}')
+                            # print(f'✅ TRANSLATION MATCH: Found plan {translated_code}')
                             break
             
             if not data_product:
@@ -463,7 +463,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                     vend_data['validationReference'] = validation_ref
                     print(f'INFO: Using validation reference for data: {validation_ref}')
             
-            print(f'DEBUG: Monnify data vend payload: {vend_data}')
+            # print(f'DEBUG: Monnify data vend payload: {vend_data}')
             
             # Step 7: Execute vend
             print(f'INFO: Executing Monnify vend for data: {network_key} {data_plan_code}')
@@ -474,7 +474,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 access_token=access_token
             )
             
-            print(f'DEBUG: Monnify data vend response: {vend_response}')
+            # print(f'DEBUG: Monnify data vend response: {vend_response}')
             vend_result = vend_response['responseBody']
             
             if vend_result.get('vendStatus') == 'SUCCESS':
@@ -649,7 +649,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
         try:
             print(f'🔄 PEYFLEX DATA PURCHASE ATTEMPT (FALLBACK):')
             print(f'   Network Key: {network_key}')
-            print(f'   Plan Code: {data_plan_code}')
+            # print(f'   Plan Code: {data_plan_code}')
             print(f'   Phone: {phone_number}')
             
             # Get network mapping
@@ -667,7 +667,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
             translated_plan_code = validation_result['translated_code']
             
             if translated_plan_code != original_plan_code:
-                print(f'🔄 PLAN CODE TRANSLATED: {original_plan_code} → {translated_plan_code}')
+                # print(f'🔄 PLAN CODE TRANSLATED: {original_plan_code} → {translated_plan_code}')
                 data_plan_code = translated_plan_code
             
             # Use the exact format from Peyflex documentation
@@ -677,7 +677,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 'mobile_number': phone_number
             }
             
-            print(f'DEBUG: Peyflex data purchase payload: {payload}')
+            # print(f'DEBUG: Peyflex data purchase payload: {payload}')
             print(f'INFO: Using API token: {PEYFLEX_API_TOKEN[:10]}...{PEYFLEX_API_TOKEN[-4:]}')
             
             headers = {
@@ -1337,7 +1337,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 plans = []
                 all_products = products_response['responseBody']['content']
                 
-                vas_log(f'Processing {len(all_products)} Monnify products for {network}')
+                # vas_log(f'Processing {len(all_products)} Monnify products for {network}')
                 
                 for product in all_products:
                     product_name = product.get('name', '').lower()
@@ -1383,22 +1383,23 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                             plan['durationUnit'] = metadata.get('durationUnit', 'MONTHLY')
                         
                         plans.append(plan)
-                        vas_log(f'✅ INCLUDED: {product_code} - {product["name"]} - ₦{product_price} (data={is_data_product}, excluded={is_excluded})')
+                        # vas_log(f'✅ INCLUDED: {product_code} - {product["name"]} - ₦{product_price} (data={is_data_product}, excluded={is_excluded})')
                     else:
-                        vas_log(f'❌ EXCLUDED: {product_code} - {product["name"]} - ₦{product_price} (data={is_data_product}, excluded={is_excluded})')
+                        pass
+                        # vas_log(f'❌ EXCLUDED: {product_code} - {product["name"]} - ₦{product_price} (data={is_data_product}, excluded={is_excluded})')
                 
-                vas_log(f'FINAL RESULT: {len(plans)} Monnify data plans for {network} (from {len(all_products)} total products)')
+                # vas_log(f'FINAL RESULT: {len(plans)} Monnify data plans for {network} (from {len(all_products)} total products)')
                 
                 if plans:
                     # CRITICAL SUCCESS: Monnify plans found - prioritize them!
-                    vas_log(f'🎯 SUCCESS: {len(plans)} Monnify data plans found for {network} - PRIORITIZING OVER PEYFLEX!')
+                    # vas_log(f'🎯 SUCCESS: {len(plans)} Monnify data plans found for {network} - PRIORITIZING OVER PEYFLEX!')
                     
                     # Add priority indicators to help frontend
                     for plan in plans:
                         plan['provider_priority'] = 'primary'  # Monnify is primary
                         plan['savings_vs_peyflex'] = 'Available'  # Will be calculated if needed
                     
-                    print(f'SUCCESS: Successfully retrieved {len(plans)} data plans from Monnify for {network}')
+                    # print(f'SUCCESS: Successfully retrieved {len(plans)} data plans from Monnify for {network}')
                     return jsonify({
                         'success': True,
                         'data': plans,
@@ -1446,29 +1447,29 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                 }
                 
                 url = f'{PEYFLEX_BASE_URL}/api/data/plans/?network={full_network_id}'
-                print(f'INFO: Calling Peyflex plans API: {url}')
+                # print(f'INFO: Calling Peyflex plans API: {url}')
                 
                 try:
                     response = requests.get(url, headers=headers, timeout=10)
-                    print(f'INFO: Peyflex plans response status: {response.status_code}')
-                    print(f'INFO: Response preview: {response.text[:500]}')
+                    # print(f'INFO: Peyflex plans response status: {response.status_code}')
+                    # print(f'INFO: Response preview: {response.text[:500]}')
                     
                     if response.status_code == 200:
                         try:
                             data = response.json()
-                            print(f'INFO: Peyflex plans response type: {type(data)}')
+                            # print(f'INFO: Peyflex plans response type: {type(data)}')
                             
                             # Handle the correct response format from documentation
                             plans_list = []
                             if isinstance(data, dict):
                                 if 'plans' in data:
                                     plans_list = data['plans']
-                                    print(f'SUCCESS: Found {len(plans_list)} plans in response.plans')
+                                    # print(f'SUCCESS: Found {len(plans_list)} plans in response.plans')
                                 elif 'data' in data:
                                     plans_list = data['data']
-                                    print(f'SUCCESS: Found {len(plans_list)} plans in response.data')
+                                    # print(f'SUCCESS: Found {len(plans_list)} plans in response.data')
                                 else:
-                                    print(f'WARNING: Dict response without plans/data key: {list(data.keys())}')
+                                    # print(f'WARNING: Dict response without plans/data key: {list(data.keys())}')
                                     # Try to use the dict itself if it looks like a plan
                                     if 'plan_code' in data or 'amount' in data:
                                         plans_list = [data]
@@ -1476,7 +1477,7 @@ def init_vas_purchase_blueprint(mongo, token_required, serialize_doc):
                                         plans_list = []
                             elif isinstance(data, list):
                                 plans_list = data
-                                print(f'SUCCESS: Direct array with {len(plans_list)} plans')
+                                # print(f'SUCCESS: Direct array with {len(plans_list)} plans')
                             else:
                                 print(f'WARNING: Unexpected response format: {data}')
                                 plans_list = []

@@ -699,7 +699,7 @@ def init_vas_wallet_blueprint(mongo, token_required, serialize_doc):
                 'getAllAvailableBanks': True  # Get all available banks for user choice
             }
             
-            print(f"DEBUG: Creating Monnify reserved account with BVN: {bvn[:3]}***{bvn[-3:]}")
+            # print(f"DEBUG: Creating Monnify reserved account with BVN: {bvn[:3]}***{bvn[-3:]}")
             
             van_response = requests.post(
                 f'{MONNIFY_BASE_URL}/api/v2/bank-transfer/reserved-accounts',

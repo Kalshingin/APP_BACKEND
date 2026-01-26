@@ -4677,12 +4677,24 @@ def init_admin_blueprint(mongo, token_required, admin_required, serialize_doc):
             # Calculate new balance
             new_balance = current_balance - amount
             
-            # Update user's liquid wallet balance
+            # 🚀 CRITICAL FIX: Update BOTH balance locations to prevent sync issues
+            # Update user's liquid wallet balance (for backward compatibility)
             mongo.db.users.update_one(
                 {'_id': ObjectId(user_id)},
                 {
                     '$set': {
                         'liquidWalletBalance': new_balance,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            # Update VAS wallet balance (primary source used by backend)
+            mongo.db.vas_wallets.update_one(
+                {'userId': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'balance': new_balance,
                         'updatedAt': datetime.utcnow()
                     }
                 }
